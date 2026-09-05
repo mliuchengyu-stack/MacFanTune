@@ -49,6 +49,9 @@
 @property NSArray *temps;
 @property NSString *helperPath;
 @property NSString *socketPath;
+@property NSString *installedHelperPath;
+@property NSString *launchDaemonPath;
+@property NSString *launchDaemonLabel;
 @property NSTimer *heartbeat;
 @property NSUInteger profileRequestID;
 @property dispatch_queue_t controlQueue;
@@ -71,6 +74,9 @@
 - (void)loadView {
   self.helperPath=[NSBundle.mainBundle pathForResource:@"fantune-smc" ofType:nil];
   self.socketPath=[NSString stringWithFormat:@"/tmp/fantune-smc-%u.sock",getuid()];
+  self.launchDaemonLabel=@"com.fantune.smc-helper";
+  self.installedHelperPath=@"/Library/PrivilegedHelperTools/com.fantune.smc-helper";
+  self.launchDaemonPath=@"/Library/LaunchDaemons/com.fantune.smc-helper.plist";
   self.controlQueue=dispatch_queue_create("com.fantune.hardware-control",DISPATCH_QUEUE_SERIAL);
   self.temps=@[@47,@43,@36]; self.selectedChip=0;
   NSView *root=[[NSView alloc] initWithFrame:NSMakeRect(0,0,1040,720)]; root.wantsLayer=YES; CAGradientLayer*bg=[CAGradientLayer layer];bg.colors=@[(id)[NSColor colorWithRed:.965 green:.975 blue:.995 alpha:1].CGColor,(id)[NSColor colorWithRed:.91 green:.93 blue:.965 alpha:1].CGColor];bg.startPoint=CGPointMake(0,1);bg.endPoint=CGPointMake(1,0);bg.frame=root.bounds;[root.layer addSublayer:bg]; self.view=root;
@@ -130,20 +136,39 @@
   if(fans.count){NSDictionary*f=fans[0];double actual=[f[@"actual"]doubleValue],target=[f[@"target"]doubleValue],lo=[f[@"min"]doubleValue],hi=[f[@"max"]doubleValue];NSInteger mode=[f[@"mode"]integerValue];if(hi>lo){self.slider.minValue=lo;self.slider.maxValue=hi;self.slider.doubleValue=MAX(lo,actual);self.rpm.stringValue=[NSString stringWithFormat:@"%.0f RPM",actual];[self.fanGraphic setFanRPM:actual];self.rangeText.stringValue=[NSString stringWithFormat:@"%.0f                         %.0f",lo,hi];self.healthFanValue.stringValue=[NSString stringWithFormat:@"%ld",fans.count];self.healthRangeValue.stringValue=[NSString stringWithFormat:@"%.0f–%.0f",lo,hi];NSInteger selected=(mode==0||mode==3)?0:(target>=hi*.9?2:1);for(NSButton*b in self.profileButtons)[self active:b yes:b.tag==200+selected];self.profileTitle.stringValue=@[@"悄悄吹",@"舒服吹",@"大力吹"][selected];self.airflowStatus.stringValue=selected==0?@"小风慢慢吹\n适合阅读、写作和摸鱼":(selected==1?@"清风营业中\n凉快一点，声音少一点":@"火力全开\n会有风声，降温很认真");self.slider.enabled=selected!=0;self.status.stringValue=[NSString stringWithFormat:@"风扇已经听你指挥 · %ld 个风扇",fans.count];}}
   else self.status.stringValue=@"未检测到可控风扇（MacBook Air 等无风扇机型不支持）";
 }
+- (BOOL)installPersistentHelper {
+  self.status.stringValue=@"首次启用需要管理员授权…";
+  NSString *temporaryPlist=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%u.plist",self.launchDaemonLabel,getuid()]];
+  NSDictionary *configuration=@{
+    @"Label":self.launchDaemonLabel,
+    @"ProgramArguments":@[self.installedHelperPath,@"serve",self.socketPath,[NSString stringWithFormat:@"%u",getuid()]],
+    @"RunAtLoad":@YES,
+    @"KeepAlive":@YES,
+    @"ProcessType":@"Interactive",
+    @"StandardOutPath":@"/tmp/fantune-smc.log",
+    @"StandardErrorPath":@"/tmp/fantune-smc.log"
+  };
+  if(![configuration writeToFile:temporaryPlist atomically:YES]){self.status.stringValue=@"辅助服务配置失败";return NO;}
+  NSString *(^quote)(NSString*)=^NSString*(NSString *value){return [NSString stringWithFormat:@"'%@'",[value stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];};
+  NSString *command=[NSString stringWithFormat:@"/usr/bin/install -d -m 755 /Library/PrivilegedHelperTools; /usr/bin/install -m 755 %@ %@; /usr/bin/install -m 644 %@ %@; /bin/launchctl bootout system/%@ >/dev/null 2>&1 || true; /bin/launchctl bootstrap system %@",quote(self.helperPath),quote(self.installedHelperPath),quote(temporaryPlist),quote(self.launchDaemonPath),self.launchDaemonLabel,quote(self.launchDaemonPath)];
+  NSTask *task=[NSTask new];NSPipe*p=[NSPipe pipe];task.standardOutput=p;task.standardError=p;task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/osascript"];
+  NSString *script=[NSString stringWithFormat:@"do shell script %@ with administrator privileges",[NSString stringWithFormat:@"\"%@\"",[command stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]]];task.arguments=@[@"-e",script];
+  @try{[task launch];[task waitUntilExit];} @catch(NSException*e){[[NSFileManager defaultManager]removeItemAtPath:temporaryPlist error:nil];self.status.stringValue=@"辅助服务安装失败";return NO;}
+  NSData*d=[[p fileHandleForReading]readDataToEndOfFile];NSString*detail=[[NSString alloc]initWithData:d encoding:NSUTF8StringEncoding];
+  [[NSFileManager defaultManager]removeItemAtPath:temporaryPlist error:nil];
+  if(task.terminationStatus!=0){self.status.stringValue=[NSString stringWithFormat:@"辅助服务安装失败：%@",detail.length?detail:@"授权已取消"];return NO;}
+  return YES;
+}
 - (BOOL)ensureDaemon {
-  if([[NSFileManager defaultManager]fileExistsAtPath:self.socketPath]){
+  BOOL installed=[[NSFileManager defaultManager]fileExistsAtPath:self.installedHelperPath]&&[[NSFileManager defaultManager]fileExistsAtPath:self.launchDaemonPath];
+  if(installed&&[[NSFileManager defaultManager]fileExistsAtPath:self.socketPath]){
     NSString *ping=[self run:@[@"send",self.socketPath,@"PING"] privileged:NO];
     if([ping hasPrefix:@"OK"])return YES;
     [[NSFileManager defaultManager]removeItemAtPath:self.socketPath error:nil];
   }
-  self.status.stringValue=@"首次启用需要管理员授权…";
-  NSString *escaped=[self.helperPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-  NSString *command=[NSString stringWithFormat:@"rm -f /tmp/fantune-smc.log; '%@' serve '%@' %u </dev/null >/tmp/fantune-smc.log 2>&1 &",escaped,self.socketPath,getuid()];
-  NSTask *task=[NSTask new];NSPipe*p=[NSPipe pipe];task.standardOutput=p;task.standardError=p;task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/osascript"];
-  NSString *script=[NSString stringWithFormat:@"do shell script %@ with administrator privileges",[NSString stringWithFormat:@"\"%@\"",[command stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]]];task.arguments=@[@"-e",script];
-  @try{[task launch];[task waitUntilExit];} @catch(NSException*e){self.status.stringValue=@"辅助服务启动失败";return NO;}
+  if(![self installPersistentHelper])return NO;
   for(int i=0;i<30;i++){usleep(100000);if([[NSFileManager defaultManager]fileExistsAtPath:self.socketPath]){NSString*ping=[self run:@[@"send",self.socketPath,@"PING"] privileged:NO];if([ping hasPrefix:@"OK"])return YES;}}
-  NSData*d=[[p fileHandleForReading]readDataToEndOfFile];NSString*detail=[[NSString alloc]initWithContentsOfFile:@"/tmp/fantune-smc.log" encoding:NSUTF8StringEncoding error:nil];if(!detail.length)detail=[[NSString alloc]initWithData:d encoding:NSUTF8StringEncoding];self.status.stringValue=[NSString stringWithFormat:@"辅助服务启动失败：%@",detail.length?detail:@"未生成 Socket"];return NO;
+  NSString*detail=[[NSString alloc]initWithContentsOfFile:@"/tmp/fantune-smc.log" encoding:NSUTF8StringEncoding error:nil];self.status.stringValue=[NSString stringWithFormat:@"辅助服务启动失败：%@",detail.length?detail:@"未生成 Socket"];return NO;
 }
 - (NSString*)hardware:(NSString*)command { if(![self ensureDaemon])return @"控制失败：辅助服务不可用";return [self run:@[@"send",self.socketPath,command] privileged:NO]; }
 - (void)setMode:(NSButton*)sender {
@@ -154,7 +179,7 @@
 }
 - (void)selectChip:(NSButton*)sender { NSInteger i=sender.tag-100; self.selectedChip=i; for(NSView*v in self.view.subviews)if([v isKindOfClass:NSButton.class]&&v.tag>=100&&v.tag<103)[self active:(NSButton*)v yes:v.tag==sender.tag]; NSArray*n=@[@"CPU 温度",@"GPU 温度",@"SSD 温度"]; self.chipTitle.stringValue=n[i]; self.temperature.stringValue=[NSString stringWithFormat:@"%@°C",self.temps[i]]; self.status.stringValue=[NSString stringWithFormat:@"已切换至 %@ · 演示数据",@[@"CPU",@"GPU",@"SSD"][i]]; }
 - (void)slide:(NSSlider*)s { self.rpm.stringValue=[NSString stringWithFormat:@"%ld RPM",(long)s.integerValue];[self.fanGraphic setFanRPM:s.doubleValue];double p=(s.doubleValue-s.minValue)/(s.maxValue-s.minValue);self.airflowStatus.stringValue=p<.35?@"小风慢慢吹\n轻轻散热，尽量不出声":(p<.75?@"清风营业中\n凉快一点，声音少一点":@"火力全开\n会有风声，降温很认真");NSString*r=[self hardware:[NSString stringWithFormat:@"SET %ld",(long)s.integerValue]];self.status.stringValue=[r hasPrefix:@"OK"]?@"好啦，已经调整好了":r; }
-- (void)restoreAuto { if([[NSFileManager defaultManager]fileExistsAtPath:self.socketPath]){[self run:@[@"send",self.socketPath,@"AUTO"] privileged:NO];[self run:@[@"send",self.socketPath,@"QUIT"] privileged:NO];} }
+- (void)restoreAuto { if([[NSFileManager defaultManager]fileExistsAtPath:self.socketPath])[self run:@[@"send",self.socketPath,@"AUTO"] privileged:NO]; }
 - (void)selectProfile:(NSButton*)sender {
   NSInteger i=sender.tag-200; NSString *name=@[@"悄悄吹",@"舒服吹",@"大力吹"][i];
   for(NSView*v in sender.superview.subviews)if([v isKindOfClass:NSButton.class]&&v.tag>=200&&v.tag<203)[self active:(NSButton*)v yes:v.tag==sender.tag];
