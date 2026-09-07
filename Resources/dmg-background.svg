@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <rect width="660" height="400" fill="#ffffff"/>
+  <text x="330" y="62" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="22" font-weight="700" fill="#1a365d">Install FanTune</text>
+  <text x="330" y="91" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="13" fill="#667085">Drag FanTune to the Applications folder</text>
+  <rect x="260" y="201" width="125" height="8" rx="4" fill="#4fa8a8"/>
+  <polygon points="372,183 402,205 372,227" fill="#4fa8a8"/>
+  <text x="330" y="300" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" font-size="12" fill="#98a2b3">Drag to install</text>
+</svg>
