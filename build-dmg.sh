@@ -3,7 +3,7 @@ set -e
 
 ROOT="${0:A:h}"
 APP="$ROOT/dist/FanTune.app"
-OUTPUT="${1:-$ROOT/dist/FanTune-1.0.0-Universal.dmg}"
+OUTPUT="${1:-$ROOT/dist/FanTune-1.0.1-Universal.dmg}"
 OUTPUT="${OUTPUT:A}"
 
 if [[ ! -d "$APP" ]]; then
