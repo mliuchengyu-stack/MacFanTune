@@ -28,6 +28,13 @@ static int read_key(const char*k,Value*v){KeyInfo i={0};int e=info(k,&i);if(e)re
 static int write_key(const char*k,const void*b,size_t n){KeyInfo i={0};int e=info(k,&i);if(e)return e;if(i.size!=n)return -2;SMCData in={0},out={0};in.key=fourcc(k);in.info.size=i.size;in.data8=6;memcpy(in.bytes,b,n);return call(&in,&out);}
 static uint32_t uint_value(Value*v){if(v->size==1)return v->bytes[0];if(v->size==2)return ((uint32_t)v->bytes[0]<<8)|v->bytes[1];return ((uint32_t)v->bytes[0]<<24)|((uint32_t)v->bytes[1]<<16)|((uint32_t)v->bytes[2]<<8)|v->bytes[3];}
 static float rpm_value(Value*v){if(v->type==fourcc("flt ")){float f;memcpy(&f,v->bytes,4);return f;}if(v->type==fourcc("fpe2"))return (float)(((uint16_t)v->bytes[0]<<8)|v->bytes[1])/4.f;return (float)uint_value(v);}
+static float temp_value(Value*v){
+  if(v->type==fourcc("flt ")&&v->size==4){float f;memcpy(&f,v->bytes,4);return f;}
+  if(v->type==fourcc("sp78")&&v->size>=2)return (float)(int8_t)v->bytes[0]+(float)v->bytes[1]/256.f;
+  if(v->type==fourcc("fpe2")&&v->size>=2)return (float)(((uint16_t)v->bytes[0]<<8)|v->bytes[1])/4.f;
+  return NAN;
+}
+static float read_temp_candidates(const char*const*keys,size_t count){float best=NAN;for(size_t i=0;i<count;i++){Value v={0};if(read_key(keys[i],&v))continue;float t=temp_value(&v);if(isfinite(t)&&t>5&&t<125&&(!isfinite(best)||t>best))best=t;}return best;}
 static int fan_count(void){Value v={0};return read_key("FNum",&v)?0:(int)uint_value(&v);}
 static void key(char*out,int i,const char*s){snprintf(out,5,"F%d%s",i,s);}
 static int mode_key(char*out,int i){key(out,i,"md");KeyInfo x;if(!info(out,&x))return 0;key(out,i,"Md");return info(out,&x);}
@@ -38,7 +45,13 @@ static float read_rpm(int i,const char*s){char k[5];key(k,i,s);Value v={0};retur
 static int make_manual(int i){int e=write_mode(i,1);if(!e)return 0;KeyInfo x;if(info("Ftst",&x))return e;uint8_t one=1;if(write_key("Ftst",&one,1))return e;for(int n=0;n<100;n++){usleep(100000);if(!write_mode(i,1))return 0;}return e;}
 static int set_all(float requested){if(geteuid()!=0){fprintf(stderr,"需要管理员权限\n");return 77;}int n=fan_count();if(n<1)return 2;for(int i=0;i<n;i++){float lo=read_rpm(i,"Mn"),hi=read_rpm(i,"Mx");if(hi<=lo)continue;float rpm=fmaxf(lo,fminf(hi,requested));int e=make_manual(i);if(e){fprintf(stderr,"风扇 %d 无法进入手动模式: 0x%x\n",i,e);return 3;}e=encode_write_rpm(i,rpm);if(e){write_mode(i,0);return 4;}}return 0;}
 static int auto_all(void){if(geteuid()!=0)return 77;int n=fan_count();for(int i=0;i<n;i++)write_mode(i,0);uint8_t zero=0;KeyInfo x;if(!info("Ftst",&x))write_key("Ftst",&zero,1);return 0;}
-static int list(void){int n=fan_count();printf("{\"fans\":[");for(int i=0;i<n;i++){if(i)putchar(',');printf("{\"id\":%d,\"actual\":%.0f,\"target\":%.0f,\"min\":%.0f,\"max\":%.0f,\"mode\":%d}",i,read_rpm(i,"Ac"),read_rpm(i,"Tg"),read_rpm(i,"Mn"),read_rpm(i,"Mx"),read_mode(i));}printf("]}\n");return n?0:2;}
+static int list(void){
+  static const char*cpu_keys[]={"TC0P","TC0D","TC0E","TC0F","TC0H","TC1C","Tp09","Tp0T","Tp01","Tp05","Tp0D","Tp0H","Tp1H"};
+  static const char*gpu_keys[]={"TG0P","TG0D","TG0H","Tg0P","Tg05","Tg0D","Tp0G"};
+  static const char*ssd_keys[]={"TH0P","Ts0P","Ts1P","TS0P","Ts0S","Ts1S"};
+  float cpu=read_temp_candidates(cpu_keys,sizeof(cpu_keys)/sizeof(cpu_keys[0])),gpu=read_temp_candidates(gpu_keys,sizeof(gpu_keys)/sizeof(gpu_keys[0])),ssd=read_temp_candidates(ssd_keys,sizeof(ssd_keys)/sizeof(ssd_keys[0]));
+  int n=fan_count();printf("{\"temperatures\":{\"cpu\":");isfinite(cpu)?printf("%.1f",cpu):printf("null");printf(",\"gpu\":");isfinite(gpu)?printf("%.1f",gpu):printf("null");printf(",\"ssd\":");isfinite(ssd)?printf("%.1f",ssd):printf("null");printf("},\"fans\":[");for(int i=0;i<n;i++){if(i)putchar(',');printf("{\"id\":%d,\"actual\":%.0f,\"target\":%.0f,\"min\":%.0f,\"max\":%.0f,\"mode\":%d}",i,read_rpm(i,"Ac"),read_rpm(i,"Tg"),read_rpm(i,"Mn"),read_rpm(i,"Mx"),read_mode(i));}printf("]}\n");return n?0:2;
+}
 static int send_cmd(const char*path,const char*cmd){int s=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un a={0};a.sun_family=AF_UNIX;strncpy(a.sun_path,path,sizeof(a.sun_path)-1);if(connect(s,(void*)&a,sizeof(a))){perror("辅助服务未连接");return 5;}write(s,cmd,strlen(cmd));write(s,"\n",1);char b[256]={0};ssize_t n=read(s,b,sizeof(b)-1);close(s);if(n>0)fwrite(b,1,n,stdout);return strncmp(b,"OK",2)?6:0;}
 static int serve(const char*path,uid_t owner){
   if(geteuid()!=0)return 77;unlink(path);int s=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un a={0};a.sun_family=AF_UNIX;strncpy(a.sun_path,path,sizeof(a.sun_path)-1);if(bind(s,(void*)&a,sizeof(a))||listen(s,8))return 7;chown(path,owner,(gid_t)-1);chmod(path,0600);
