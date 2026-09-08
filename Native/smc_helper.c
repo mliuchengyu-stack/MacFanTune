@@ -43,7 +43,7 @@ static int read_mode(int i){char k[5];Value v={0};if(!mode_key(k,i))return read_
 static int encode_write_rpm(int i,float rpm){char k[5];key(k,i,"Tg");KeyInfo x={0};int e=info(k,&x);if(e)return e;if(x.type==fourcc("flt "))return write_key(k,&rpm,4);if(x.type==fourcc("fpe2")){uint16_t n=(uint16_t)(rpm*4);uint8_t b[2]={n>>8,n&255};return write_key(k,b,2);}return -4;}
 static float read_rpm(int i,const char*s){char k[5];key(k,i,s);Value v={0};return read_key(k,&v)?0:rpm_value(&v);}
 static int make_manual(int i){int e=write_mode(i,1);if(!e)return 0;KeyInfo x;if(info("Ftst",&x))return e;uint8_t one=1;if(write_key("Ftst",&one,1))return e;for(int n=0;n<100;n++){usleep(100000);if(!write_mode(i,1))return 0;}return e;}
-static int set_all(float requested){if(geteuid()!=0){fprintf(stderr,"需要管理员权限\n");return 77;}int n=fan_count();if(n<1)return 2;for(int i=0;i<n;i++){float lo=read_rpm(i,"Mn"),hi=read_rpm(i,"Mx");if(hi<=lo)continue;float rpm=fmaxf(lo,fminf(hi,requested));int e=make_manual(i);if(e){fprintf(stderr,"风扇 %d 无法进入手动模式: 0x%x\n",i,e);return 3;}e=encode_write_rpm(i,rpm);if(e){write_mode(i,0);return 4;}}return 0;}
+static int set_all(float requested){if(geteuid()!=0){fprintf(stderr,"Administrator privileges required\n");return 77;}int n=fan_count();if(n<1)return 2;for(int i=0;i<n;i++){float lo=read_rpm(i,"Mn"),hi=read_rpm(i,"Mx");if(hi<=lo)continue;float rpm=fmaxf(lo,fminf(hi,requested));int e=make_manual(i);if(e){fprintf(stderr,"Fan %d could not enter manual mode: 0x%x\n",i,e);return 3;}e=encode_write_rpm(i,rpm);if(e){write_mode(i,0);return 4;}}return 0;}
 static int auto_all(void){if(geteuid()!=0)return 77;int n=fan_count();for(int i=0;i<n;i++)write_mode(i,0);uint8_t zero=0;KeyInfo x;if(!info("Ftst",&x))write_key("Ftst",&zero,1);return 0;}
 static int list(void){
   static const char*cpu_keys[]={"TC0P","TC0D","TC0E","TC0F","TC0H","TC1C","Tp09","Tp0T","Tp01","Tp05","Tp0D","Tp0H","Tp1H"};
@@ -52,7 +52,7 @@ static int list(void){
   float cpu=read_temp_candidates(cpu_keys,sizeof(cpu_keys)/sizeof(cpu_keys[0])),gpu=read_temp_candidates(gpu_keys,sizeof(gpu_keys)/sizeof(gpu_keys[0])),ssd=read_temp_candidates(ssd_keys,sizeof(ssd_keys)/sizeof(ssd_keys[0]));
   int n=fan_count();printf("{\"temperatures\":{\"cpu\":");isfinite(cpu)?printf("%.1f",cpu):printf("null");printf(",\"gpu\":");isfinite(gpu)?printf("%.1f",gpu):printf("null");printf(",\"ssd\":");isfinite(ssd)?printf("%.1f",ssd):printf("null");printf("},\"fans\":[");for(int i=0;i<n;i++){if(i)putchar(',');printf("{\"id\":%d,\"actual\":%.0f,\"target\":%.0f,\"min\":%.0f,\"max\":%.0f,\"mode\":%d}",i,read_rpm(i,"Ac"),read_rpm(i,"Tg"),read_rpm(i,"Mn"),read_rpm(i,"Mx"),read_mode(i));}printf("]}\n");return n?0:2;
 }
-static int send_cmd(const char*path,const char*cmd){int s=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un a={0};a.sun_family=AF_UNIX;strncpy(a.sun_path,path,sizeof(a.sun_path)-1);if(connect(s,(void*)&a,sizeof(a))){perror("辅助服务未连接");return 5;}write(s,cmd,strlen(cmd));write(s,"\n",1);char b[256]={0};ssize_t n=read(s,b,sizeof(b)-1);close(s);if(n>0)fwrite(b,1,n,stdout);return strncmp(b,"OK",2)?6:0;}
+static int send_cmd(const char*path,const char*cmd){int s=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un a={0};a.sun_family=AF_UNIX;strncpy(a.sun_path,path,sizeof(a.sun_path)-1);if(connect(s,(void*)&a,sizeof(a))){perror("Helper service unavailable");return 5;}write(s,cmd,strlen(cmd));write(s,"\n",1);char b[256]={0};ssize_t n=read(s,b,sizeof(b)-1);close(s);if(n>0)fwrite(b,1,n,stdout);return strncmp(b,"OK",2)?6:0;}
 static int serve(const char*path,uid_t owner){
   if(geteuid()!=0)return 77;unlink(path);int s=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un a={0};a.sun_family=AF_UNIX;strncpy(a.sun_path,path,sizeof(a.sun_path)-1);if(bind(s,(void*)&a,sizeof(a))||listen(s,8))return 7;chown(path,owner,(gid_t)-1);chmod(path,0600);
   time_t last=time(NULL);int controlled=0;
@@ -61,6 +61,6 @@ static int serve(const char*path,uid_t owner){
 }
 int main(int argc,char**argv){
   if(argc>3&&!strcmp(argv[1],"send"))return send_cmd(argv[2],argv[3]);
-  int e=open_smc();if(e){fprintf(stderr,"无法连接 AppleSMC: 0x%x\n",e);return 1;}
+  int e=open_smc();if(e){fprintf(stderr,"Unable to connect to AppleSMC: 0x%x\n",e);return 1;}
   int r=argc<2?list():!strcmp(argv[1],"list")?list():!strcmp(argv[1],"auto")?auto_all():!strcmp(argv[1],"set")&&argc>2?set_all(strtof(argv[2],0)):!strcmp(argv[1],"serve")&&argc>3?serve(argv[2],(uid_t)strtoul(argv[3],0,10)):64;IOServiceClose(conn);return r;
 }

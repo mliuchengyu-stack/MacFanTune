@@ -1,6 +1,11 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
 #import <ServiceManagement/ServiceManagement.h>
+#import <IOKit/ps/IOPowerSources.h>
+#import <IOKit/ps/IOPSKeys.h>
+
+static BOOL FTUsesChinese(void){NSString *language=NSLocale.preferredLanguages.firstObject.lowercaseString?:@"";return [language hasPrefix:@"zh"] || [language containsString:@"hans"] || [language containsString:@"hant"];}
+static id FT(id chinese,id english){return FTUsesChinese()?chinese:english;}
 
 @interface CardView : NSView @end
 @implementation CardView
@@ -43,7 +48,7 @@
   NSDictionary *textAttrs=@{NSFontAttributeName:[NSFont systemFontOfSize:15 weight:NSFontWeightRegular],NSForegroundColorAttributeName:ink};
   [self drawSymbol:@"wifi" centerX:170 size:19 color:ink];
   NSBezierPath *input=[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(208,5,26,24) xRadius:5 yRadius:5];[[NSColor colorWithWhite:.25 alpha:1]setFill];[input fill];[@"A" drawAtPoint:NSMakePoint(214,7) withAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:15],NSForegroundColorAttributeName:NSColor.whiteColor}];
-  [@"周六 下午9:41" drawAtPoint:NSMakePoint(255,7) withAttributes:textAttrs];
+  [FT(@"周六 下午9:41",@"Sat 9:41 PM") drawAtPoint:NSMakePoint(255,7) withAttributes:textAttrs];
   [self drawSymbol:@"magnifyingglass" centerX:435 size:18 color:ink];
   NSImageSymbolConfiguration *siriSize=[NSImageSymbolConfiguration configurationWithPointSize:21 weight:NSFontWeightRegular];NSImageSymbolConfiguration *multicolor=[NSImageSymbolConfiguration configurationPreferringMulticolor];NSImage *siri=[[NSImage imageWithSystemSymbolName:@"siri" accessibilityDescription:nil] imageWithSymbolConfiguration:[siriSize configurationByApplyingConfiguration:multicolor]];if(siri){CGFloat ratio=siri.size.width/MAX(siri.size.height,1);[siri drawInRect:NSMakeRect(480-21*ratio/2,6.5,21*ratio,21) fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1 respectFlipped:NO hints:nil];}
   [self drawSymbol:@"line.3.horizontal.decrease" centerX:530 size:19 color:ink];
@@ -75,6 +80,7 @@
 @property NSArray *temps;
 @property GraphView *temperatureGraph;
 @property NSMutableArray<NSMutableArray<NSNumber*>*> *temperatureHistory;
+@property NSArray<NSTextField*> *temperatureTimeLabels;
 @property NSString *helperPath;
 @property NSString *socketPath;
 @property NSString *installedHelperPath;
@@ -84,6 +90,10 @@
 @property NSUInteger profileRequestID;
 @property dispatch_queue_t controlQueue;
 @property NSArray<NSButton*> *profileButtons;
+@property double currentFanRPM,fanMinimum,fanMaximum,lastAutomaticTarget;
+@property NSDate *lastAutomaticChange,*lastHistorySave;
+@property BOOL highTemperatureProtectionActive;
+@property BOOL automaticControlEngaged;
 @end
 
 @implementation FanTuneController
@@ -117,65 +127,94 @@
   self.temps=@[@47,@43,@36]; self.selectedChip=0; self.temperatureHistory=[NSMutableArray arrayWithArray:@[[NSMutableArray array],[NSMutableArray array],[NSMutableArray array]]];
   NSView *root=[[NSView alloc] initWithFrame:NSMakeRect(0,0,1040,720)]; root.wantsLayer=YES; CAGradientLayer*bg=[CAGradientLayer layer];bg.colors=@[(id)[NSColor colorWithRed:.965 green:.975 blue:.995 alpha:1].CGColor,(id)[NSColor colorWithRed:.91 green:.93 blue:.965 alpha:1].CGColor];bg.startPoint=CGPointMake(0,1);bg.endPoint=CGPointMake(1,0);bg.frame=root.bounds;[root.layer addSublayer:bg]; self.view=root;
   NSColor *white=[NSColor colorWithWhite:.11 alpha:1],*muted=[NSColor colorWithWhite:.43 alpha:1],*blue=[NSColor colorWithRed:.22 green:.46 blue:.92 alpha:1];
-  [self add:[self label:@"●  现在很舒服" size:11 weight:NSFontWeightMedium color:[NSColor colorWithRed:.35 green:.86 blue:.62 alpha:1]] to:root x:36 y:677 w:200 h:18];
-  [self add:[self label:@"让 Mac 凉快一下" size:30 weight:NSFontWeightBold color:white] to:root x:36 y:632 w:360 h:42];
-  [self add:[self label:@"热了就吹吹风，忙起来也不慌。" size:12 weight:NSFontWeightRegular color:muted] to:root x:36 y:611 w:300 h:18];
-  NSArray *names=@[@"Apple M3 Max\nCPU        47°",@"40 核\nGPU        43°",@"2 TB\nSSD        36°"];
+  [self add:[self label:FT(@"●  现在很舒服",@"●  Running comfortably") size:11 weight:NSFontWeightMedium color:[NSColor colorWithRed:.35 green:.86 blue:.62 alpha:1]] to:root x:36 y:677 w:220 h:18];
+  [self add:[self label:FT(@"让 Mac 凉快一下",@"Keep your Mac cool") size:30 weight:NSFontWeightBold color:white] to:root x:36 y:632 w:420 h:42];
+  [self add:[self label:FT(@"热了就吹吹风，忙起来也不慌。",@"Cool when needed, quiet when possible.") size:12 weight:NSFontWeightRegular color:muted] to:root x:36 y:611 w:360 h:18];
+  NSArray *names=@[@"Apple M3 Max\nCPU        47°",FT(@"40 核\nGPU        43°",@"40 cores\nGPU        43°"),@"2 TB\nSSD        36°"];
   for(int i=0;i<3;i++){ NSButton *b=[self button:names[i] action:@selector(selectChip:)]; b.tag=100+i; [self add:b to:root x:36+i*322 y:532 w:310 h:65]; [self active:b yes:i==0]; }
   CardView *tempCard=[[CardView alloc]initWithFrame:NSZeroRect]; [self add:tempCard to:root x:36 y:240 w:620 h:276];
-  self.chipTitle=[self label:@"CPU 温度" size:11 weight:NSFontWeightSemibold color:muted]; [self add:self.chipTitle to:tempCard x:22 y:235 w:150 h:18];
+  self.chipTitle=[self label:FT(@"CPU 温度",@"CPU Temperature") size:11 weight:NSFontWeightSemibold color:muted]; [self add:self.chipTitle to:tempCard x:22 y:235 w:150 h:18];
   self.temperature=[self label:@"47°C" size:46 weight:NSFontWeightSemibold color:white]; [self add:self.temperature to:tempCard x:20 y:178 w:180 h:56];
-  [self add:[self label:@"↘ 3°\n过去 5 分钟" size:11 weight:NSFontWeightMedium color:[NSColor colorWithRed:.35 green:.86 blue:.62 alpha:1]] to:tempCard x:500 y:205 w:95 h:38];
+  [self add:[self label:FT(@"↘ 3°\n过去 5 分钟",@"↘ 3°\nLast 5 minutes") size:11 weight:NSFontWeightMedium color:[NSColor colorWithRed:.35 green:.86 blue:.62 alpha:1]] to:tempCard x:490 y:205 w:105 h:38];
   self.temperatureGraph=[GraphView new];[self add:self.temperatureGraph to:tempCard x:25 y:55 w:570 h:118];
-  NSArray<NSString*>*times=@[@"10:20",@"10:25",@"10:30",@"10:35",@"现在"];
-  for(int i=0;i<5;i++){NSTextField*t=[self label:times[i] size:9 weight:NSFontWeightRegular color:muted];t.alignment=i==0?NSTextAlignmentLeft:(i==4?NSTextAlignmentRight:NSTextAlignmentCenter);CGFloat x=25+i*131.25;[self add:t to:tempCard x:x y:28 w:45 h:18];}
+  NSMutableArray *timeLabels=[NSMutableArray array];
+  for(int i=0;i<5;i++){NSTextField*t=[self label:@"" size:9 weight:NSFontWeightRegular color:muted];t.alignment=i==0?NSTextAlignmentLeft:(i==4?NSTextAlignmentRight:NSTextAlignmentCenter);CGFloat x=25+i*131.25;[self add:t to:tempCard x:x y:28 w:45 h:18];[timeLabels addObject:t];}self.temperatureTimeLabels=timeLabels;[self updateGraphTimeLabels];
   CardView *fan=[[CardView alloc]initWithFrame:NSZeroRect]; [self add:fan to:root x:672 y:240 w:332 h:276];
-  [self add:[self label:@"风扇转速" size:11 weight:NSFontWeightSemibold color:muted] to:fan x:22 y:235 w:120 h:18];
+  [self add:[self label:FT(@"风扇转速",@"Fan Speed") size:11 weight:NSFontWeightSemibold color:muted] to:fan x:22 y:235 w:120 h:18];
   self.rpm=[self label:@"1,849 RPM" size:26 weight:NSFontWeightBold color:white]; [self add:self.rpm to:fan x:20 y:198 w:220 h:34];
   self.fanGraphic=[FanGraphicView new];[self add:self.fanGraphic to:fan x:18 y:80 w:140 h:116];
-  self.airflowStatus=[self label:@"小风慢慢吹\n适合阅读、写作和摸鱼" size:13 weight:NSFontWeightMedium color:blue];[self add:self.airflowStatus to:fan x:178 y:123 w:142 h:45];
+  self.airflowStatus=[self label:FT(@"小风慢慢吹\n适合阅读、写作和摸鱼",@"A gentle breeze\nGreat for light work") size:13 weight:NSFontWeightMedium color:blue];[self add:self.airflowStatus to:fan x:168 y:123 w:152 h:45];
   self.slider=[NSSlider sliderWithValue:1849 minValue:1000 maxValue:5200 target:self action:@selector(slide:)]; self.slider.enabled=NO; self.slider.continuous=NO; [self add:self.slider to:fan x:22 y:50 w:288 h:26];
   self.rangeText=[self label:@"1,000                         5,200" size:9 weight:NSFontWeightRegular color:muted]; [self add:self.rangeText to:fan x:22 y:29 w:288 h:16];
   CardView *profile=[[CardView alloc]initWithFrame:NSZeroRect]; [self add:profile to:root x:36 y:55 w:620 h:169];
-  [self add:[self label:@"吹风方式" size:11 weight:NSFontWeightSemibold color:muted] to:profile x:22 y:128 w:120 h:18]; self.profileTitle=[self label:@"舒服吹" size:21 weight:NSFontWeightBold color:white]; [self add:self.profileTitle to:profile x:22 y:98 w:120 h:28];
-  NSArray *profiles=@[@"☾  悄悄吹\n轻轻散热，尽量不出声",@"舒服吹\n不吵也不热，日常刚好",@"大力吹\n重活和高负载都安排上"];
+  [self add:[self label:FT(@"吹风方式",@"Cooling Mode") size:11 weight:NSFontWeightSemibold color:muted] to:profile x:22 y:128 w:120 h:18]; self.profileTitle=[self label:FT(@"舒服吹",@"Balanced") size:21 weight:NSFontWeightBold color:white]; [self add:self.profileTitle to:profile x:22 y:98 w:140 h:28];
+  NSArray *profiles=FT(@[@"☾  悄悄吹\n轻轻散热，尽量不出声",@"舒服吹\n不吵也不热，日常刚好",@"大力吹\n重活和高负载都安排上"],@[@"☾  Quiet\nCool gently, stay silent",@"Balanced\nCool and quiet for daily use",@"Performance\nMaximum cooling for heavy work"]);
   NSMutableArray*profileList=[NSMutableArray array];for(int i=0;i<3;i++){NSButton*b=[self button:profiles[i] action:@selector(selectProfile:)];if(i==1||i==2){b.image=i==1?[self windIcon]:[self zapIcon];b.imagePosition=NSImageLeft;b.imageHugsTitle=YES;}b.tag=200+i;[self add:b to:profile x:20+i*195 y:22 w:183 h:62];[self active:b yes:i==1];[profileList addObject:b];}self.profileButtons=profileList;
   CardView *health=[[CardView alloc]initWithFrame:NSZeroRect]; [self add:health to:root x:672 y:55 w:332 h:169];
-  [self add:[self label:@"散热系统" size:11 weight:NSFontWeightSemibold color:muted] to:health x:22 y:128 w:120 h:18];
+  [self add:[self label:FT(@"散热系统",@"Cooling System") size:11 weight:NSFontWeightSemibold color:muted] to:health x:22 y:128 w:120 h:18];
   HealthIconView*ok=[HealthIconView new];[self add:ok to:health x:22 y:78 w:40 h:40];
-  [self add:[self label:@"现在很舒服" size:15 weight:NSFontWeightSemibold color:white] to:health x:75 y:99 w:180 h:21];
-  [self add:[self label:@"温度不错，风扇也很有精神" size:9 weight:NSFontWeightRegular color:muted] to:health x:75 y:82 w:210 h:16];
+  [self add:[self label:FT(@"现在很舒服",@"Running comfortably") size:15 weight:NSFontWeightSemibold color:white] to:health x:75 y:99 w:200 h:21];
+  [self add:[self label:FT(@"温度不错，风扇也很有精神",@"Temperatures and fans look good") size:9 weight:NSFontWeightRegular color:muted] to:health x:75 y:82 w:220 h:16];
   NSBox*healthLine=[NSBox new];healthLine.boxType=NSBoxSeparator;[self add:healthLine to:health x:22 y:65 w:288 h:1];
   self.healthFanValue=[self label:@"—" size:14 weight:NSFontWeightSemibold color:white];[self add:self.healthFanValue to:health x:22 y:37 w:75 h:19];
-  [self add:[self label:@"风扇" size:8 weight:NSFontWeightRegular color:muted] to:health x:22 y:22 w:75 h:14];
+  [self add:[self label:FT(@"风扇",@"Fans") size:8 weight:NSFontWeightRegular color:muted] to:health x:22 y:22 w:75 h:14];
   [self add:[self label:@"AppleSMC" size:13 weight:NSFontWeightSemibold color:white] to:health x:115 y:37 w:85 h:19];
-  [self add:[self label:@"控制接口" size:8 weight:NSFontWeightRegular color:muted] to:health x:115 y:22 w:75 h:14];
+  [self add:[self label:FT(@"控制接口",@"Controller") size:8 weight:NSFontWeightRegular color:muted] to:health x:115 y:22 w:75 h:14];
   self.healthRangeValue=[self label:@"—" size:13 weight:NSFontWeightSemibold color:white];[self add:self.healthRangeValue to:health x:218 y:37 w:92 h:19];
-  [self add:[self label:@"RPM 范围" size:8 weight:NSFontWeightRegular color:muted] to:health x:218 y:22 w:75 h:14];
+  [self add:[self label:FT(@"RPM 范围",@"RPM Range") size:8 weight:NSFontWeightRegular color:muted] to:health x:218 y:22 w:75 h:14];
   for(NSNumber*x in @[@105,@208]){NSBox*v=[NSBox new];v.boxType=NSBoxSeparator;[self add:v to:health x:x.doubleValue y:22 w:1 h:34];}
   self.status=[self label:@"" size:10 weight:NSFontWeightRegular color:muted];
   [self refreshHardware];
   __weak typeof(self) weakSelf=self; self.heartbeat=[NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer*t){typeof(self) strongSelf=weakSelf;if(!strongSelf)return;[strongSelf refreshHardware];if([[NSFileManager defaultManager]fileExistsAtPath:strongSelf.socketPath])[strongSelf run:@[@"send",strongSelf.socketPath,@"PING"] privileged:NO];}];
 }
 - (NSString*)run:(NSArray<NSString*>*)args privileged:(BOOL)privileged {
-  if(!self.helperPath)return @"硬件控制组件缺失";
+  if(!self.helperPath)return FT(@"硬件控制组件缺失",@"Hardware control component is missing");
   NSTask *task=[NSTask new]; NSPipe *pipe=[NSPipe pipe]; task.standardOutput=pipe; task.standardError=pipe;
   if(privileged){
     NSString *cmd=[NSString stringWithFormat:@"'%@' %@",[self.helperPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"],[args componentsJoinedByString:@" "]];
     NSString *script=[NSString stringWithFormat:@"do shell script %@ with administrator privileges",[NSString stringWithFormat:@"\"%@\"",[cmd stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]]];
     task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/osascript"]; task.arguments=@[@"-e",script];
   } else { task.executableURL=[NSURL fileURLWithPath:self.helperPath]; task.arguments=args; }
-  @try{[task launch];[task waitUntilExit];NSData*d=[[pipe fileHandleForReading]readDataToEndOfFile];NSString*out=[[NSString alloc]initWithData:d encoding:NSUTF8StringEncoding];return task.terminationStatus==0?out:[NSString stringWithFormat:@"控制失败：%@",out.length?out:@"未知错误"];}@catch(NSException*e){return [NSString stringWithFormat:@"控制失败：%@",e.reason];}
+  @try{[task launch];[task waitUntilExit];NSData*d=[[pipe fileHandleForReading]readDataToEndOfFile];NSString*out=[[NSString alloc]initWithData:d encoding:NSUTF8StringEncoding];return task.terminationStatus==0?out:[NSString stringWithFormat:FT(@"控制失败：%@",@"Control failed: %@"),out.length?out:FT(@"未知错误",@"Unknown error")];}@catch(NSException*e){return [NSString stringWithFormat:FT(@"控制失败：%@",@"Control failed: %@"),e.reason];}
 }
+- (void)updateGraphTimeLabels {
+  if(self.temperatureTimeLabels.count!=5)return;
+  NSDate *now=[NSDate date];NSDateFormatter *formatter=[NSDateFormatter new];formatter.dateFormat=@"HH:mm";
+  NSArray<NSNumber*> *offsets=@[@(-300),@(-225),@(-150),@(-75)];
+  for(NSInteger i=0;i<4;i++)self.temperatureTimeLabels[i].stringValue=[formatter stringFromDate:[now dateByAddingTimeInterval:offsets[i].doubleValue]];
+  self.temperatureTimeLabels[4].stringValue=FT(@"现在",@"Now");
+}
+- (BOOL)isOnExternalPower {
+  CFTypeRef info=IOPSCopyPowerSourcesInfo();if(!info)return YES;CFStringRef state=IOPSGetProvidingPowerSourceType(info);BOOL external=state&&CFEqual(state,CFSTR(kIOPSACPowerValue));CFRelease(info);return external;
+}
+- (double)curveTargetForTemperature:(double)temperature {
+  NSUserDefaults *d=NSUserDefaults.standardUserDefaults;NSArray *temps=[d arrayForKey:@"curveTemperatures"]?:@[@50,@65,@80,@90];NSArray *levels=[d arrayForKey:@"curveLevels"]?:@[@20,@45,@75,@100];double percentage=[levels.firstObject doubleValue];for(NSInteger i=1;i<4;i++){double low=[temps[i-1]doubleValue],high=[temps[i]doubleValue];if(temperature<=high){double progress=MAX(0,MIN(1,(temperature-low)/MAX(1,high-low)));percentage=[levels[i-1]doubleValue]+progress*([levels[i]doubleValue]-[levels[i-1]doubleValue]);break;}percentage=[levels[i]doubleValue];}return self.fanMinimum+(self.fanMaximum-self.fanMinimum)*percentage/100.0;
+}
+- (void)recordHistoryIfNeeded {
+  NSDate *now=[NSDate date];if(self.lastHistorySave&&[now timeIntervalSinceDate:self.lastHistorySave]<30)return;self.lastHistorySave=now;NSUserDefaults*d=NSUserDefaults.standardUserDefaults;NSMutableArray *history=[[d arrayForKey:@"thermalHistory"]mutableCopy]?:[NSMutableArray array];[history addObject:@{@"time":@([now timeIntervalSince1970]),@"cpu":self.temps[0],@"gpu":self.temps[1],@"ssd":self.temps[2],@"rpm":@(self.currentFanRPM)}];NSTimeInterval cutoff=now.timeIntervalSince1970-86400;while(history.count&&[history[0][@"time"]doubleValue]<cutoff)[history removeObjectAtIndex:0];while(history.count>2880)[history removeObjectAtIndex:0];[d setObject:history forKey:@"thermalHistory"];
+}
+- (void)evaluateAutomaticCooling {
+  if(self.fanMaximum<=self.fanMinimum)return;NSUserDefaults*d=NSUserDefaults.standardUserDefaults;double hottest=MAX([self.temps[0]doubleValue],[self.temps[1]doubleValue]);double high=[d doubleForKey:@"highTemperatureThreshold"]?:85,recovery=[d doubleForKey:@"highTemperatureRecovery"]?:75;BOOL protection=[d boolForKey:@"highTemperatureProtection"];
+  if(protection&&hottest>=high)self.highTemperatureProtectionActive=YES;else if(self.highTemperatureProtectionActive&&hottest<=recovery)self.highTemperatureProtectionActive=NO;
+  double target=NAN;BOOL useAuto=NO;if(self.highTemperatureProtectionActive)target=self.fanMaximum;
+  NSDate *boost=[d objectForKey:@"temporaryBoostUntil"];if(!isfinite(target)&&[boost isKindOfClass:NSDate.class]&&boost.timeIntervalSinceNow>0)target=self.fanMaximum;
+  if(!isfinite(target)&&[d boolForKey:@"applicationAutomationEnabled"]){NSString *rules=[d stringForKey:@"performanceApplications"]?:@"Final Cut Pro,Blender,Xcode";NSString *front=NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.lowercaseString?:@"";for(NSString *name in [rules componentsSeparatedByString:@","]){if([name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].length&&[front containsString:[name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString]){target=self.fanMaximum;break;}}}
+  if(!isfinite(target)&&[d boolForKey:@"powerAutomationEnabled"]){if([self isOnExternalPower])target=self.fanMinimum+(self.fanMaximum-self.fanMinimum)*.62;else useAuto=YES;}
+  if(!isfinite(target)&&!useAuto&&[d boolForKey:@"customCurveEnabled"])target=[self curveTargetForTemperature:hottest];if(!isfinite(target)&&!useAuto){if(self.automaticControlEngaged)useAuto=YES;else return;}
+  double marker=useAuto?-1:target;if(fabs(marker-self.lastAutomaticTarget)<80)return;if(self.lastAutomaticChange&&[[NSDate date]timeIntervalSinceDate:self.lastAutomaticChange]<12)return;self.lastAutomaticTarget=marker;self.lastAutomaticChange=[NSDate date];self.automaticControlEngaged=!useAuto;NSString *command=useAuto?@"AUTO":[NSString stringWithFormat:@"SET %.0f",target];dispatch_async(self.controlQueue,^{[self hardware:command];});
+}
+- (void)applyProfileIndex:(NSInteger)index {if(index<0||index>2)return;NSButton *button=self.profileButtons[index];[self selectProfile:button];}
+- (void)startTemporaryBoostMinutes:(NSInteger)minutes {[NSUserDefaults.standardUserDefaults setObject:[NSDate dateWithTimeIntervalSinceNow:minutes*60] forKey:@"temporaryBoostUntil"];self.lastAutomaticTarget=NAN;[self evaluateAutomaticCooling];}
+- (NSArray*)savedThermalHistory {return [NSUserDefaults.standardUserDefaults arrayForKey:@"thermalHistory"]?:@[];}
 - (void)refreshHardware {
   NSString *out=[self run:@[@"list"] privileged:NO]; NSData*d=[out dataUsingEncoding:NSUTF8StringEncoding]; NSDictionary*j=d?[NSJSONSerialization JSONObjectWithData:d options:0 error:nil]:nil; NSArray*fans=j[@"fans"];
-  NSDictionary *readings=j[@"temperatures"]; NSMutableArray *next=[self.temps mutableCopy]; NSArray *keys=@[@"cpu",@"gpu",@"ssd"];for(NSInteger i=0;i<3;i++){NSNumber *value=readings[keys[i]];if([value isKindOfClass:NSNumber.class]){next[i]=value;NSMutableArray *history=self.temperatureHistory[i];[history addObject:value];while(history.count>30)[history removeObjectAtIndex:0];}}self.temps=next;NSNumber *shown=self.temps[self.selectedChip];self.temperature.stringValue=[NSString stringWithFormat:@"%.1f°C",shown.doubleValue];self.temperatureGraph.values=[self.temperatureHistory[self.selectedChip] copy];self.temperatureGraph.needsDisplay=YES;
+  NSDictionary *readings=j[@"temperatures"]; NSMutableArray *next=[self.temps mutableCopy]; NSArray *keys=@[@"cpu",@"gpu",@"ssd"];for(NSInteger i=0;i<3;i++){NSNumber *value=readings[keys[i]];if([value isKindOfClass:NSNumber.class]){next[i]=value;NSMutableArray *history=self.temperatureHistory[i];[history addObject:value];while(history.count>150)[history removeObjectAtIndex:0];}}self.temps=next;NSNumber *shown=self.temps[self.selectedChip];self.temperature.stringValue=[NSString stringWithFormat:@"%.1f°C",shown.doubleValue];self.temperatureGraph.values=[self.temperatureHistory[self.selectedChip] copy];self.temperatureGraph.needsDisplay=YES;[self updateGraphTimeLabels];
   [[NSNotificationCenter defaultCenter]postNotificationName:@"FanTuneTemperaturesDidUpdate" object:nil userInfo:@{@"temperatures":self.temps}];
-  if(fans.count){NSDictionary*f=fans[0];double actual=[f[@"actual"]doubleValue],target=[f[@"target"]doubleValue],lo=[f[@"min"]doubleValue],hi=[f[@"max"]doubleValue];NSInteger mode=[f[@"mode"]integerValue];if(hi>lo){self.slider.minValue=lo;self.slider.maxValue=hi;self.slider.doubleValue=MAX(lo,actual);self.rpm.stringValue=[NSString stringWithFormat:@"%.0f RPM",actual];[self.fanGraphic setFanRPM:actual];self.rangeText.stringValue=[NSString stringWithFormat:@"%.0f                         %.0f",lo,hi];self.healthFanValue.stringValue=[NSString stringWithFormat:@"%ld",fans.count];self.healthRangeValue.stringValue=[NSString stringWithFormat:@"%.0f–%.0f",lo,hi];NSInteger selected=(mode==0||mode==3)?0:(target>=hi*.9?2:1);for(NSButton*b in self.profileButtons)[self active:b yes:b.tag==200+selected];self.profileTitle.stringValue=@[@"悄悄吹",@"舒服吹",@"大力吹"][selected];self.airflowStatus.stringValue=selected==0?@"小风慢慢吹\n适合阅读、写作和摸鱼":(selected==1?@"清风营业中\n凉快一点，声音少一点":@"火力全开\n会有风声，降温很认真");self.slider.enabled=selected!=0;self.status.stringValue=[NSString stringWithFormat:@"风扇已经听你指挥 · %ld 个风扇",fans.count];}}
-  else self.status.stringValue=@"未检测到可控风扇（MacBook Air 等无风扇机型不支持）";
+  if(fans.count){NSDictionary*f=fans[0];double actual=[f[@"actual"]doubleValue],target=[f[@"target"]doubleValue],lo=[f[@"min"]doubleValue],hi=[f[@"max"]doubleValue];NSInteger mode=[f[@"mode"]integerValue];if(hi>lo){self.currentFanRPM=actual;self.fanMinimum=lo;self.fanMaximum=hi;self.slider.minValue=lo;self.slider.maxValue=hi;self.slider.doubleValue=MAX(lo,actual);self.rpm.stringValue=[NSString stringWithFormat:@"%.0f RPM",actual];[self.fanGraphic setFanRPM:actual];self.rangeText.stringValue=[NSString stringWithFormat:@"%.0f                         %.0f",lo,hi];self.healthFanValue.stringValue=[NSString stringWithFormat:@"%ld",fans.count];self.healthRangeValue.stringValue=[NSString stringWithFormat:@"%.0f–%.0f",lo,hi];NSInteger selected=(mode==0||mode==3)?0:(target>=hi*.9?2:1);for(NSButton*b in self.profileButtons)[self active:b yes:b.tag==200+selected];self.profileTitle.stringValue=FT(@[@"悄悄吹",@"舒服吹",@"大力吹"],@[@"Quiet",@"Balanced",@"Performance"])[selected];self.airflowStatus.stringValue=FT(@[@"小风慢慢吹\n适合阅读、写作和摸鱼",@"清风营业中\n凉快一点，声音少一点",@"火力全开\n会有风声，降温很认真"],@[@"A gentle breeze\nGreat for light work",@"A steady breeze\nCooler with less noise",@"Maximum airflow\nSerious cooling with fan noise"])[selected];self.slider.enabled=selected!=0;self.status.stringValue=[NSString stringWithFormat:FT(@"风扇已经听你指挥 · %ld 个风扇",@"Fan control active · %ld fan(s)"),fans.count];}}
+  else self.status.stringValue=FT(@"未检测到可控风扇（MacBook Air 等无风扇机型不支持）",@"No controllable fan detected (fanless Macs are not supported)");[self recordHistoryIfNeeded];[self evaluateAutomaticCooling];
 }
 - (BOOL)installPersistentHelper {
-  self.status.stringValue=@"首次启用需要管理员授权…";
+  self.status.stringValue=FT(@"首次启用需要管理员授权…",@"Administrator authorization is required for first use…");
   NSString *temporaryPlist=[NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%u.plist",self.launchDaemonLabel,getuid()]];
   NSDictionary *configuration=@{
     @"Label":self.launchDaemonLabel,
@@ -186,15 +225,15 @@
     @"StandardOutPath":@"/tmp/fantune-smc.log",
     @"StandardErrorPath":@"/tmp/fantune-smc.log"
   };
-  if(![configuration writeToFile:temporaryPlist atomically:YES]){self.status.stringValue=@"辅助服务配置失败";return NO;}
+  if(![configuration writeToFile:temporaryPlist atomically:YES]){self.status.stringValue=FT(@"辅助服务配置失败",@"Failed to configure the helper service");return NO;}
   NSString *(^quote)(NSString*)=^NSString*(NSString *value){return [NSString stringWithFormat:@"'%@'",[value stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];};
   NSString *command=[NSString stringWithFormat:@"/usr/bin/install -d -m 755 /Library/PrivilegedHelperTools; /usr/bin/install -m 755 %@ %@; /usr/bin/install -m 644 %@ %@; /bin/launchctl bootout system/%@ >/dev/null 2>&1 || true; /bin/launchctl bootstrap system %@",quote(self.helperPath),quote(self.installedHelperPath),quote(temporaryPlist),quote(self.launchDaemonPath),self.launchDaemonLabel,quote(self.launchDaemonPath)];
   NSTask *task=[NSTask new];NSPipe*p=[NSPipe pipe];task.standardOutput=p;task.standardError=p;task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/osascript"];
   NSString *script=[NSString stringWithFormat:@"do shell script %@ with administrator privileges",[NSString stringWithFormat:@"\"%@\"",[command stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]]];task.arguments=@[@"-e",script];
-  @try{[task launch];[task waitUntilExit];} @catch(NSException*e){[[NSFileManager defaultManager]removeItemAtPath:temporaryPlist error:nil];self.status.stringValue=@"辅助服务安装失败";return NO;}
+  @try{[task launch];[task waitUntilExit];} @catch(NSException*e){[[NSFileManager defaultManager]removeItemAtPath:temporaryPlist error:nil];self.status.stringValue=FT(@"辅助服务安装失败",@"Failed to install the helper service");return NO;}
   NSData*d=[[p fileHandleForReading]readDataToEndOfFile];NSString*detail=[[NSString alloc]initWithData:d encoding:NSUTF8StringEncoding];
   [[NSFileManager defaultManager]removeItemAtPath:temporaryPlist error:nil];
-  if(task.terminationStatus!=0){self.status.stringValue=[NSString stringWithFormat:@"辅助服务安装失败：%@",detail.length?detail:@"授权已取消"];return NO;}
+  if(task.terminationStatus!=0){self.status.stringValue=[NSString stringWithFormat:FT(@"辅助服务安装失败：%@",@"Helper installation failed: %@"),detail.length?detail:FT(@"授权已取消",@"Authorization cancelled")];return NO;}
   return YES;
 }
 - (BOOL)ensureDaemon {
@@ -206,31 +245,32 @@
   }
   if(![self installPersistentHelper])return NO;
   for(int i=0;i<30;i++){usleep(100000);if([[NSFileManager defaultManager]fileExistsAtPath:self.socketPath]){NSString*ping=[self run:@[@"send",self.socketPath,@"PING"] privileged:NO];if([ping hasPrefix:@"OK"])return YES;}}
-  NSString*detail=[[NSString alloc]initWithContentsOfFile:@"/tmp/fantune-smc.log" encoding:NSUTF8StringEncoding error:nil];self.status.stringValue=[NSString stringWithFormat:@"辅助服务启动失败：%@",detail.length?detail:@"未生成 Socket"];return NO;
+  NSString*detail=[[NSString alloc]initWithContentsOfFile:@"/tmp/fantune-smc.log" encoding:NSUTF8StringEncoding error:nil];self.status.stringValue=[NSString stringWithFormat:FT(@"辅助服务启动失败：%@",@"Helper failed to start: %@"),detail.length?detail:FT(@"未生成 Socket",@"Socket was not created")];return NO;
 }
-- (NSString*)hardware:(NSString*)command { if(![self ensureDaemon])return @"控制失败：辅助服务不可用";return [self run:@[@"send",self.socketPath,command] privileged:NO]; }
+- (NSString*)hardware:(NSString*)command { if(![self ensureDaemon])return FT(@"控制失败：辅助服务不可用",@"Control failed: helper service unavailable");return [self run:@[@"send",self.socketPath,command] privileged:NO]; }
 - (void)setMode:(NSButton*)sender {
   BOOL manual=sender.tag==1;
   NSString*r=[self hardware:manual?[NSString stringWithFormat:@"SET %.0f",self.slider.doubleValue]:@"AUTO"];
   if(![r hasPrefix:@"OK"]){self.status.stringValue=r;return;}
-  self.slider.enabled=manual; [self active:self.autoButton yes:!manual]; [self active:self.manualButton yes:manual]; self.status.stringValue=manual?@"真实硬件控制中 · 拖动滑杆可调节":@"已归还 macOS 自动温控";
+  self.slider.enabled=manual; [self active:self.autoButton yes:!manual]; [self active:self.manualButton yes:manual]; self.status.stringValue=manual?FT(@"真实硬件控制中 · 拖动滑杆可调节",@"Hardware control active · Drag the slider to adjust"):FT(@"已归还 macOS 自动温控",@"Fan control returned to macOS");
 }
-- (void)selectChip:(NSButton*)sender { NSInteger i=sender.tag-100; self.selectedChip=i; for(NSView*v in self.view.subviews)if([v isKindOfClass:NSButton.class]&&v.tag>=100&&v.tag<103)[self active:(NSButton*)v yes:v.tag==sender.tag]; NSArray*n=@[@"CPU 温度",@"GPU 温度",@"SSD 温度"]; self.chipTitle.stringValue=n[i]; self.temperature.stringValue=[NSString stringWithFormat:@"%.1f°C",[self.temps[i]doubleValue]];self.temperatureGraph.values=[self.temperatureHistory[i]copy];self.temperatureGraph.needsDisplay=YES; self.status.stringValue=[NSString stringWithFormat:@"正在查看 %@ 实时温度",@[@"CPU",@"GPU",@"SSD"][i]]; }
-- (void)slide:(NSSlider*)s { self.rpm.stringValue=[NSString stringWithFormat:@"%ld RPM",(long)s.integerValue];[self.fanGraphic setFanRPM:s.doubleValue];double p=(s.doubleValue-s.minValue)/(s.maxValue-s.minValue);self.airflowStatus.stringValue=p<.35?@"小风慢慢吹\n轻轻散热，尽量不出声":(p<.75?@"清风营业中\n凉快一点，声音少一点":@"火力全开\n会有风声，降温很认真");NSString*r=[self hardware:[NSString stringWithFormat:@"SET %ld",(long)s.integerValue]];self.status.stringValue=[r hasPrefix:@"OK"]?@"好啦，已经调整好了":r; }
+- (void)selectChip:(NSButton*)sender { NSInteger i=sender.tag-100; self.selectedChip=i; for(NSView*v in self.view.subviews)if([v isKindOfClass:NSButton.class]&&v.tag>=100&&v.tag<103)[self active:(NSButton*)v yes:v.tag==sender.tag]; NSArray*n=FT(@[@"CPU 温度",@"GPU 温度",@"SSD 温度"],@[@"CPU Temperature",@"GPU Temperature",@"SSD Temperature"]); self.chipTitle.stringValue=n[i]; self.temperature.stringValue=[NSString stringWithFormat:@"%.1f°C",[self.temps[i]doubleValue]];self.temperatureGraph.values=[self.temperatureHistory[i]copy];self.temperatureGraph.needsDisplay=YES; self.status.stringValue=[NSString stringWithFormat:FT(@"正在查看 %@ 实时温度",@"Viewing live %@ temperature"),@[@"CPU",@"GPU",@"SSD"][i]]; }
+- (void)slide:(NSSlider*)s { self.rpm.stringValue=[NSString stringWithFormat:@"%ld RPM",(long)s.integerValue];[self.fanGraphic setFanRPM:s.doubleValue];double p=(s.doubleValue-s.minValue)/(s.maxValue-s.minValue);NSArray *air=FT(@[@"小风慢慢吹\n轻轻散热，尽量不出声",@"清风营业中\n凉快一点，声音少一点",@"火力全开\n会有风声，降温很认真"],@[@"A gentle breeze\nCooling quietly",@"A steady breeze\nCooler with less noise",@"Maximum airflow\nSerious cooling with fan noise"]);self.airflowStatus.stringValue=p<.35?air[0]:(p<.75?air[1]:air[2]);NSString*r=[self hardware:[NSString stringWithFormat:@"SET %ld",(long)s.integerValue]];self.status.stringValue=[r hasPrefix:@"OK"]?FT(@"好啦，已经调整好了",@"Done, your cooling mode is set"):r; }
 - (void)restoreAuto { if([[NSFileManager defaultManager]fileExistsAtPath:self.socketPath])[self run:@[@"send",self.socketPath,@"AUTO"] privileged:NO]; }
 - (void)selectProfile:(NSButton*)sender {
-  NSInteger i=sender.tag-200; NSString *name=@[@"悄悄吹",@"舒服吹",@"大力吹"][i];
+  self.automaticControlEngaged=NO;[NSUserDefaults.standardUserDefaults removeObjectForKey:@"temporaryBoostUntil"];
+  NSInteger i=sender.tag-200; NSString *name=FT(@[@"悄悄吹",@"舒服吹",@"大力吹"],@[@"Quiet",@"Balanced",@"Performance"])[i];
   for(NSView*v in sender.superview.subviews)if([v isKindOfClass:NSButton.class]&&v.tag>=200&&v.tag<203)[self active:(NSButton*)v yes:v.tag==sender.tag];
   self.profileTitle.stringValue=name; BOOL manual=i!=0; self.slider.enabled=manual;
-  self.airflowStatus.stringValue=i==0?@"小风慢慢吹\n适合阅读、写作和摸鱼":(i==1?@"清风营业中\n凉快一点，声音少一点":@"火力全开\n会有风声，降温很认真");
+  self.airflowStatus.stringValue=FT(@[@"小风慢慢吹\n适合阅读、写作和摸鱼",@"清风营业中\n凉快一点，声音少一点",@"火力全开\n会有风声，降温很认真"],@[@"A gentle breeze\nGreat for light work",@"A steady breeze\nCooler with less noise",@"Maximum airflow\nSerious cooling with fan noise"])[i];
   double target=i==1?self.slider.minValue+(self.slider.maxValue-self.slider.minValue)*.62:self.slider.maxValue;
   if(manual){self.slider.doubleValue=target;self.rpm.stringValue=[NSString stringWithFormat:@"%.0f RPM",target];[self.fanGraphic setFanRPM:target];}
   NSUInteger request=++self.profileRequestID; NSString*command=i==0?@"AUTO":[NSString stringWithFormat:@"SET %.0f",target];
-  dispatch_async(self.controlQueue,^{NSString*result=[self hardware:command];dispatch_async(dispatch_get_main_queue(),^{if(request!=self.profileRequestID)return;if(![result hasPrefix:@"OK"]){NSAlert*a=[NSAlert new];a.messageText=@"风扇没听清";a.informativeText=@"这次没有调整成功，再试一次吧。";a.alertStyle=NSAlertStyleWarning;[a beginSheetModalForWindow:self.view.window completionHandler:nil];return;}self.status.stringValue=@"好啦，已经调整好了";});});
+  dispatch_async(self.controlQueue,^{NSString*result=[self hardware:command];dispatch_async(dispatch_get_main_queue(),^{if(request!=self.profileRequestID)return;if(![result hasPrefix:@"OK"]){NSAlert*a=[NSAlert new];a.messageText=FT(@"风扇没听清",@"The fan did not respond");a.informativeText=FT(@"这次没有调整成功，再试一次吧。",@"The adjustment did not succeed. Please try again.");a.alertStyle=NSAlertStyleWarning;[a beginSheetModalForWindow:self.view.window completionHandler:nil];return;}self.status.stringValue=FT(@"好啦，已经调整好了",@"Done, your cooling mode is set");});});
 }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate,NSTextFieldDelegate>
 @property NSWindow *window;
 @property FanTuneController *controller;
 @property NSStatusItem *statusItem;
@@ -245,7 +285,7 @@
 @end
 @implementation AppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
-  [[NSUserDefaults standardUserDefaults]registerDefaults:@{@"statusBarEnabled":@YES,@"statusBarWhenWindowOpen":@YES,@"statusBarAtLaunch":@YES,@"statusMetricLogo":@YES,@"statusMetricCPU":@YES,@"statusMetricGPU":@NO,@"statusMetricSSD":@NO,@"statusMetricFan":@YES}];
+  [[NSUserDefaults standardUserDefaults]registerDefaults:@{@"statusBarEnabled":@YES,@"statusBarWhenWindowOpen":@YES,@"statusBarAtLaunch":@YES,@"statusMetricLogo":@YES,@"statusMetricCPU":@YES,@"statusMetricGPU":@NO,@"statusMetricSSD":@NO,@"statusMetricFan":@YES,@"customCurveEnabled":@NO,@"curveTemperatures":@[@50,@65,@80,@90],@"curveLevels":@[@20,@45,@75,@100],@"highTemperatureProtection":@YES,@"highTemperatureThreshold":@85,@"highTemperatureRecovery":@75,@"applicationAutomationEnabled":@NO,@"performanceApplications":@"Final Cut Pro, Blender, Xcode",@"powerAutomationEnabled":@NO}];
   self.controller=[FanTuneController new];
   self.window=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,1040,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
   self.window.title=@"FanTune"; self.window.titlebarAppearsTransparent=YES; self.window.appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua]; self.window.backgroundColor=[NSColor colorWithWhite:.96 alpha:1]; self.window.contentViewController=self.controller; self.window.releasedWhenClosed=NO;
@@ -254,61 +294,77 @@
   [self.window center]; [self showWindow:nil];
 }
 - (void)setupStatusItem {
-  NSMenu *mainMenu=[NSMenu new];NSMenuItem *appRoot=[NSMenuItem new];[mainMenu addItem:appRoot];NSMenu *appMenu=[NSMenu new];appRoot.submenu=appMenu;NSMenuItem *preferences=[[NSMenuItem alloc]initWithTitle:@"偏好设置…" action:@selector(showPreferences:) keyEquivalent:@","];preferences.target=self;[appMenu addItem:preferences];[appMenu addItem:NSMenuItem.separatorItem];NSMenuItem *mainQuit=[[NSMenuItem alloc]initWithTitle:@"退出 FanTune" action:@selector(quitApp:) keyEquivalent:@"q"];mainQuit.target=self;[appMenu addItem:mainQuit];NSApp.mainMenu=mainMenu;
+  NSMenu *mainMenu=[NSMenu new];NSMenuItem *appRoot=[NSMenuItem new];[mainMenu addItem:appRoot];NSMenu *appMenu=[NSMenu new];appRoot.submenu=appMenu;NSMenuItem *preferences=[[NSMenuItem alloc]initWithTitle:FT(@"偏好设置…",@"Preferences…") action:@selector(showPreferences:) keyEquivalent:@","];preferences.target=self;[appMenu addItem:preferences];[appMenu addItem:NSMenuItem.separatorItem];NSMenuItem *mainQuit=[[NSMenuItem alloc]initWithTitle:FT(@"退出 FanTune",@"Quit FanTune") action:@selector(quitApp:) keyEquivalent:@"q"];mainQuit.target=self;[appMenu addItem:mainQuit];NSApp.mainMenu=mainMenu;
   self.statusItem=[NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
   NSImage *icon=[NSImage imageWithSystemSymbolName:@"fanblades" accessibilityDescription:@"FanTune"];
-  icon.template=YES; self.statusItem.button.image=icon; self.statusItem.button.toolTip=@"FanTune · 正在守护 Mac 温度";
+  icon.template=YES; self.statusItem.button.image=icon; self.statusItem.button.toolTip=FT(@"FanTune · 正在守护 Mac 温度",@"FanTune · Keeping your Mac cool");
   NSMenu *menu=[NSMenu new];
-  NSMenuItem *state=[[NSMenuItem alloc]initWithTitle:@"FanTune 正在吹风" action:nil keyEquivalent:@""]; state.enabled=NO; [menu addItem:state];
+  NSMenuItem *state=[[NSMenuItem alloc]initWithTitle:FT(@"FanTune 正在吹风",@"FanTune is cooling") action:nil keyEquivalent:@""]; state.enabled=NO; [menu addItem:state];
   [menu addItem:NSMenuItem.separatorItem];
-  NSMenuItem *show=[[NSMenuItem alloc]initWithTitle:@"打开 FanTune" action:@selector(showWindow:) keyEquivalent:@""]; show.target=self; [menu addItem:show];
+  NSArray *quickTitles=FT(@[@"悄悄吹",@"舒服吹",@"大力吹"],@[@"Quiet",@"Balanced",@"Performance"]);for(NSInteger i=0;i<3;i++){NSMenuItem *item=[[NSMenuItem alloc]initWithTitle:quickTitles[i] action:@selector(quickProfile:) keyEquivalent:@""];item.tag=i;item.target=self;[menu addItem:item];}
+  NSMenuItem *boost=[[NSMenuItem alloc]initWithTitle:FT(@"临时大力散热",@"Temporary Boost") action:nil keyEquivalent:@""];NSMenu *boostMenu=[NSMenu new];for(NSNumber *minutes in @[@5,@10,@15]){NSMenuItem *item=[[NSMenuItem alloc]initWithTitle:[NSString stringWithFormat:FT(@"%@ 分钟",@"%@ minutes"),minutes] action:@selector(startBoost:) keyEquivalent:@""];item.tag=minutes.integerValue;item.target=self;[boostMenu addItem:item];}boost.submenu=boostMenu;[menu addItem:boost];
   [menu addItem:NSMenuItem.separatorItem];
-  NSMenuItem *settings=[[NSMenuItem alloc]initWithTitle:@"偏好设置…" action:@selector(showPreferences:) keyEquivalent:@","];settings.target=self;[menu addItem:settings];
+  NSMenuItem *show=[[NSMenuItem alloc]initWithTitle:FT(@"打开 FanTune",@"Open FanTune") action:@selector(showWindow:) keyEquivalent:@""]; show.target=self; [menu addItem:show];
   [menu addItem:NSMenuItem.separatorItem];
-  NSMenuItem *quit=[[NSMenuItem alloc]initWithTitle:@"退出 FanTune" action:@selector(quitApp:) keyEquivalent:@"q"]; quit.target=self; [menu addItem:quit];
+  NSMenuItem *settings=[[NSMenuItem alloc]initWithTitle:FT(@"偏好设置…",@"Preferences…") action:@selector(showPreferences:) keyEquivalent:@","];settings.target=self;[menu addItem:settings];
+  [menu addItem:NSMenuItem.separatorItem];
+  NSMenuItem *quit=[[NSMenuItem alloc]initWithTitle:FT(@"退出 FanTune",@"Quit FanTune") action:@selector(quitApp:) keyEquivalent:@"q"]; quit.target=self; [menu addItem:quit];
   self.statusItem.menu=menu;
 }
 - (NSTextField*)preferenceLabel:(NSString*)text frame:(NSRect)frame size:(CGFloat)size weight:(NSFontWeight)weight {NSTextField *label=[NSTextField labelWithString:text];label.frame=frame;label.font=[NSFont systemFontOfSize:size weight:weight];label.textColor=[NSColor colorWithWhite:.28 alpha:1];return label;}
 - (void)showPreferences:(id)sender {
   if(!self.preferencesWindow){
     self.preferencesWindow=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,600,460) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskFullSizeContentView backing:NSBackingStoreBuffered defer:NO];
-    self.preferencesWindow.title=@"偏好设置";self.preferencesWindow.titleVisibility=NSWindowTitleHidden;self.preferencesWindow.titlebarAppearsTransparent=YES;self.preferencesWindow.releasedWhenClosed=NO;self.preferencesWindow.backgroundColor=NSColor.whiteColor;
+    self.preferencesWindow.title=FT(@"偏好设置",@"Preferences");self.preferencesWindow.titleVisibility=NSWindowTitleHidden;self.preferencesWindow.titlebarAppearsTransparent=YES;self.preferencesWindow.releasedWhenClosed=NO;self.preferencesWindow.backgroundColor=NSColor.whiteColor;
     NSView *root=self.preferencesWindow.contentView;root.wantsLayer=YES;root.layer.backgroundColor=NSColor.whiteColor.CGColor;
-    NSTextField *heading=[self preferenceLabel:@"偏好设置" frame:NSMakeRect(0,414,600,28) size:16 weight:NSFontWeightSemibold];heading.alignment=NSTextAlignmentCenter;[root addSubview:heading];
-    NSMutableArray *tabs=[NSMutableArray array];for(NSInteger i=0;i<2;i++){NSButton *tab=[NSButton buttonWithTitle:@[@"通用",@"状态栏"][i] target:self action:@selector(changePreferencesTab:)];tab.tag=i;tab.bordered=NO;tab.font=[NSFont systemFontOfSize:13 weight:NSFontWeightMedium];tab.frame=NSMakeRect(30+i*90,370,78,32);[root addSubview:tab];[tabs addObject:tab];}self.preferenceTabs=tabs;
-    self.preferenceUnderline=[NSBox new];self.preferenceUnderline.boxType=NSBoxCustom;self.preferenceUnderline.fillColor=[NSColor colorWithRed:1 green:.69 blue:.05 alpha:1];self.preferenceUnderline.borderWidth=0;self.preferenceUnderline.frame=NSMakeRect(42,366,54,3);[root addSubview:self.preferenceUnderline];
+    NSTextField *heading=[self preferenceLabel:FT(@"偏好设置",@"Preferences") frame:NSMakeRect(0,414,600,28) size:16 weight:NSFontWeightSemibold];heading.alignment=NSTextAlignmentCenter;[root addSubview:heading];
+    NSMutableArray *tabs=[NSMutableArray array];NSArray *tabTitles=FT(@[@"通用",@"状态栏",@"自动温控",@"历史"],@[@"General",@"Menu Bar",@"Automation",@"History"]);for(NSInteger i=0;i<4;i++){NSButton *tab=[NSButton buttonWithTitle:tabTitles[i] target:self action:@selector(changePreferencesTab:)];tab.tag=i;tab.bordered=NO;tab.font=[NSFont systemFontOfSize:12 weight:NSFontWeightMedium];tab.frame=NSMakeRect(24+i*120,370,108,32);[root addSubview:tab];[tabs addObject:tab];}self.preferenceTabs=tabs;
+    self.preferenceUnderline=[NSBox new];self.preferenceUnderline.boxType=NSBoxCustom;self.preferenceUnderline.fillColor=[NSColor colorWithRed:1 green:.69 blue:.05 alpha:1];self.preferenceUnderline.borderWidth=0;self.preferenceUnderline.frame=NSMakeRect(40,366,76,3);[root addSubview:self.preferenceUnderline];
     NSBox *line=[NSBox new];line.boxType=NSBoxSeparator;line.frame=NSMakeRect(0,364,600,1);[root addSubview:line];
     self.preferencesContent=[[NSView alloc]initWithFrame:NSMakeRect(0,0,600,364)];[root addSubview:self.preferencesContent];[self renderPreferencesTab:0];
   }
   [self.preferencesWindow center];[NSApp activateIgnoringOtherApps:YES];[self.preferencesWindow makeKeyAndOrderFront:nil];
 }
-- (void)changePreferencesTab:(NSButton*)sender {self.preferenceUnderline.frame=NSMakeRect(42+sender.tag*90,366,54,3);[self renderPreferencesTab:sender.tag];}
+- (void)changePreferencesTab:(NSButton*)sender {self.preferenceUnderline.frame=NSMakeRect(40+sender.tag*120,366,76,3);[self renderPreferencesTab:sender.tag];}
 - (void)addPreferenceSeparator:(CGFloat)y {NSBox *line=[NSBox new];line.boxType=NSBoxSeparator;line.frame=NSMakeRect(0,y,600,1);[self.preferencesContent addSubview:line];}
+- (NSString*)historySummary:(NSArray*)history seconds:(NSTimeInterval)seconds title:(NSString*)title {NSTimeInterval now=NSDate.date.timeIntervalSince1970;double minCPU=DBL_MAX,maxCPU=0,sumCPU=0,sumRPM=0;NSInteger count=0;for(NSDictionary *sample in history){if(now-[sample[@"time"]doubleValue]<=seconds){double cpu=[sample[@"cpu"]doubleValue];minCPU=MIN(minCPU,cpu);maxCPU=MAX(maxCPU,cpu);sumCPU+=cpu;sumRPM+=[sample[@"rpm"]doubleValue];count++;}}return count?[NSString stringWithFormat:FT(@"%@  CPU %.1f / %.1f / %.1f°C · 风扇平均 %.0f RPM",@"%@  CPU %.1f / %.1f / %.1f°C · Avg fan %.0f RPM"),title,minCPU,sumCPU/count,maxCPU,sumRPM/count]:[NSString stringWithFormat:FT(@"%@  暂无数据",@"%@  No data yet"),title];}
+- (NSString*)historyCorrelation:(NSArray*)history {if(history.count<2)return FT(@"温度与转速关联：正在收集数据",@"Temperature / fan correlation: collecting data");double sx=0,sy=0,sxx=0,syy=0,sxy=0;for(NSDictionary*s in history){double x=[s[@"cpu"]doubleValue],y=[s[@"rpm"]doubleValue];sx+=x;sy+=y;sxx+=x*x;syy+=y*y;sxy+=x*y;}double n=history.count,den=sqrt(MAX(0,(n*sxx-sx*sx)*(n*syy-sy*sy))),r=den>0?(n*sxy-sx*sy)/den:0;return [NSString stringWithFormat:FT(@"温度与转速关联：%.0f%%（数值越高，风扇越随温度提升）",@"Temperature / fan correlation: %.0f%% (higher means a stronger response)"),MAX(-1,MIN(1,r))*100];}
 - (void)renderPreferencesTab:(NSInteger)tab {
   for(NSView *view in self.preferencesContent.subviews)[view removeFromSuperview];
   for(NSButton *button in self.preferenceTabs)button.contentTintColor=button.tag==tab?[NSColor colorWithWhite:.25 alpha:1]:[NSColor colorWithWhite:.65 alpha:1];
   if(tab==0){
-    [self.preferencesContent addSubview:[self preferenceLabel:@"启动与运行" frame:NSMakeRect(36,312,180,24) size:15 weight:NSFontWeightSemibold]];
-    [self.preferencesContent addSubview:[self preferenceLabel:@"开机自动启动" frame:NSMakeRect(36,260,220,21) size:13 weight:NSFontWeightMedium]];
-    [self.preferencesContent addSubview:[self preferenceLabel:@"登录 Mac 后自动启动 FanTune，悄悄守护温度。" frame:NSMakeRect(36,237,470,18) size:11 weight:NSFontWeightRegular]];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"启动与运行",@"Startup & Operation") frame:NSMakeRect(36,312,220,24) size:15 weight:NSFontWeightSemibold]];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"开机自动启动",@"Launch at login") frame:NSMakeRect(36,260,220,21) size:13 weight:NSFontWeightMedium]];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"登录 Mac 后自动启动 FanTune，悄悄守护温度。",@"Start FanTune after login and quietly watch your temperatures.") frame:NSMakeRect(36,237,470,18) size:11 weight:NSFontWeightRegular]];
     NSSwitch *launch=[NSSwitch new];launch.frame=NSMakeRect(508,253,52,32);launch.state=SMAppService.mainAppService.status==SMAppServiceStatusEnabled?NSControlStateValueOn:NSControlStateValueOff;launch.target=self;launch.action=@selector(toggleLaunchAtLogin:);[self.preferencesContent addSubview:launch];
-  }else{
+  }else if(tab==1){
     NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
-    [self.preferencesContent addSubview:[self preferenceLabel:@"启用状态栏" frame:NSMakeRect(30,316,220,24) size:14 weight:NSFontWeightSemibold]];NSSwitch *enabled=[NSSwitch new];enabled.frame=NSMakeRect(508,310,52,32);enabled.state=[defaults boolForKey:@"statusBarEnabled"];enabled.target=self;enabled.action=@selector(toggleStatusOption:);enabled.tag=100;[self.preferencesContent addSubview:enabled];
-    [self.preferencesContent addSubview:[self preferenceLabel:@"打开主界面时显示状态栏" frame:NSMakeRect(38,274,300,22) size:12 weight:NSFontWeightMedium]];NSSwitch *open=[NSSwitch new];open.frame=NSMakeRect(508,268,52,32);open.state=[defaults boolForKey:@"statusBarWhenWindowOpen"];open.target=self;open.action=@selector(toggleStatusOption:);open.tag=101;[self.preferencesContent addSubview:open];
-    [self.preferencesContent addSubview:[self preferenceLabel:@"开机时显示状态栏" frame:NSMakeRect(38,236,280,22) size:12 weight:NSFontWeightMedium]];NSSwitch *startup=[NSSwitch new];startup.frame=NSMakeRect(508,230,52,32);startup.state=[defaults boolForKey:@"statusBarAtLaunch"];startup.target=self;startup.action=@selector(toggleStatusOption:);startup.tag=102;[self.preferencesContent addSubview:startup];
-    [self.preferencesContent addSubview:[self preferenceLabel:@"状态栏展示信息设置" frame:NSMakeRect(30,198,260,22) size:13 weight:NSFontWeightSemibold]];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"启用状态栏",@"Enable menu bar") frame:NSMakeRect(30,316,220,24) size:14 weight:NSFontWeightSemibold]];NSSwitch *enabled=[NSSwitch new];enabled.frame=NSMakeRect(508,310,52,32);enabled.state=[defaults boolForKey:@"statusBarEnabled"];enabled.target=self;enabled.action=@selector(toggleStatusOption:);enabled.tag=100;[self.preferencesContent addSubview:enabled];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"打开主界面时显示状态栏",@"Show while the main window is open") frame:NSMakeRect(38,274,320,22) size:12 weight:NSFontWeightMedium]];NSSwitch *open=[NSSwitch new];open.frame=NSMakeRect(508,268,52,32);open.state=[defaults boolForKey:@"statusBarWhenWindowOpen"];open.target=self;open.action=@selector(toggleStatusOption:);open.tag=101;[self.preferencesContent addSubview:open];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"开机时显示状态栏",@"Show at launch") frame:NSMakeRect(38,236,280,22) size:12 weight:NSFontWeightMedium]];NSSwitch *startup=[NSSwitch new];startup.frame=NSMakeRect(508,230,52,32);startup.state=[defaults boolForKey:@"statusBarAtLaunch"];startup.target=self;startup.action=@selector(toggleStatusOption:);startup.tag=102;[self.preferencesContent addSubview:startup];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"状态栏展示信息设置",@"Menu bar information") frame:NSMakeRect(30,198,260,22) size:13 weight:NSFontWeightSemibold]];
     NSView *preview=[[NSView alloc]initWithFrame:NSMakeRect(30,154,540,34)];preview.wantsLayer=YES;preview.layer.backgroundColor=[NSColor colorWithRed:.95 green:.96 blue:.98 alpha:1].CGColor;preview.layer.cornerRadius=6;[self.preferencesContent addSubview:preview];StatusBarSampleView *sample=[[StatusBarSampleView alloc]initWithFrame:preview.bounds];sample.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[preview addSubview:sample];
-    NSArray *titles=@[@"Logo",@"CPU 温度",@"GPU 温度",@"SSD 温度",@"风扇转速"];NSArray *keys=@[@"statusMetricLogo",@"statusMetricCPU",@"statusMetricGPU",@"statusMetricSSD",@"statusMetricFan"];NSArray *values=@[@"",[self metricText:0 suffix:@"°"],[self metricText:1 suffix:@"°"],[self metricText:2 suffix:@"°"],[NSString stringWithFormat:@"%.0f RPM",self.controller.fanGraphic.rpm]];
+    NSArray *titles=FT(@[@"Logo",@"CPU 温度",@"GPU 温度",@"SSD 温度",@"风扇转速"],@[@"Logo",@"CPU Temp",@"GPU Temp",@"SSD Temp",@"Fan Speed"]);NSArray *keys=@[@"statusMetricLogo",@"statusMetricCPU",@"statusMetricGPU",@"statusMetricSSD",@"statusMetricFan"];NSArray *values=@[@"",[self metricText:0 suffix:@"°"],[self metricText:1 suffix:@"°"],[self metricText:2 suffix:@"°"],[NSString stringWithFormat:@"%.0f RPM",self.controller.fanGraphic.rpm]];
     for(NSInteger i=0;i<5;i++){CGFloat x=30+i*108;NSView *card=[[NSView alloc]initWithFrame:NSMakeRect(x,24,96,116)];card.wantsLayer=YES;card.layer.backgroundColor=[NSColor colorWithRed:.95 green:.96 blue:.98 alpha:1].CGColor;[self.preferencesContent addSubview:card];NSButton *check=[NSButton checkboxWithTitle:@"" target:self action:@selector(toggleStatusMetric:)];check.frame=NSMakeRect(70,90,20,20);check.tag=i;check.state=[defaults boolForKey:keys[i]];[card addSubview:check];if(i==0){NSImageView *logo=[[NSImageView alloc]initWithFrame:NSMakeRect(36,49,24,24)];logo.image=[NSImage imageWithSystemSymbolName:@"fanblades" accessibilityDescription:@"FanTune"];logo.contentTintColor=[NSColor colorWithWhite:.28 alpha:1];logo.imageScaling=NSImageScaleProportionallyUpOrDown;[card addSubview:logo];}else{NSTextField *value=[self preferenceLabel:values[i] frame:NSMakeRect(4,48,88,24) size:11 weight:NSFontWeightMedium];value.alignment=NSTextAlignmentCenter;[card addSubview:value];}NSTextField *name=[self preferenceLabel:titles[i] frame:NSMakeRect(4,15,88,21) size:11 weight:NSFontWeightRegular];name.alignment=NSTextAlignmentCenter;[card addSubview:name];}
+  }else if(tab==2){
+    NSUserDefaults *d=NSUserDefaults.standardUserDefaults;NSArray *labels=FT(@[@"启用自定义温控曲线",@"启用高温保护",@"按前台应用自动切换到大力吹",@"根据电源状态自动切换"],@[@"Enable custom fan curve",@"Enable heat protection",@"Use Performance for selected foreground apps",@"Switch automatically based on power source"]);NSArray *keys=@[@"customCurveEnabled",@"highTemperatureProtection",@"applicationAutomationEnabled",@"powerAutomationEnabled"];for(NSInteger i=0;i<4;i++){NSTextField *label=[self preferenceLabel:labels[i] frame:NSMakeRect(36,312-i*54,360,22) size:12 weight:i==0?NSFontWeightSemibold:NSFontWeightMedium];[self.preferencesContent addSubview:label];NSSwitch *toggle=[NSSwitch new];toggle.frame=NSMakeRect(508,306-i*54,52,32);toggle.tag=200+i;toggle.state=[d boolForKey:keys[i]];toggle.target=self;toggle.action=@selector(toggleAutomation:);[self.preferencesContent addSubview:toggle];}NSTextField *high=[[NSTextField alloc]initWithFrame:NSMakeRect(300,252,46,24)];high.doubleValue=[d doubleForKey:@"highTemperatureThreshold"];high.tag=402;high.delegate=self;[self.preferencesContent addSubview:high];[self.preferencesContent addSubview:[self preferenceLabel:@"°C →" frame:NSMakeRect(350,255,34,20) size:11 weight:NSFontWeightRegular]];NSTextField *recover=[[NSTextField alloc]initWithFrame:NSMakeRect(384,252,46,24)];recover.doubleValue=[d doubleForKey:@"highTemperatureRecovery"];recover.tag=403;recover.delegate=self;[self.preferencesContent addSubview:recover];[self.preferencesContent addSubview:[self preferenceLabel:FT(@"°C 恢复",@"°C recover") frame:NSMakeRect(434,255,70,20) size:11 weight:NSFontWeightRegular]];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"自定义曲线（温度:风量%，逗号分隔）",@"Custom curve (temperature:fan %, comma-separated)") frame:NSMakeRect(36,103,300,19) size:11 weight:NSFontWeightMedium]];NSTextField *curve=[[NSTextField alloc]initWithFrame:NSMakeRect(335,98,225,25)];NSArray *curveTemps=[d arrayForKey:@"curveTemperatures"],*curveLevels=[d arrayForKey:@"curveLevels"];NSMutableArray *curveParts=[NSMutableArray array];for(NSInteger i=0;i<MIN(curveTemps.count,curveLevels.count);i++)[curveParts addObject:[NSString stringWithFormat:@"%.0f:%.0f",[curveTemps[i]doubleValue],[curveLevels[i]doubleValue]]];curve.stringValue=[curveParts componentsJoinedByString:@", "];curve.tag=401;curve.delegate=self;[self.preferencesContent addSubview:curve];
+    [self.preferencesContent addSubview:[self preferenceLabel:FT(@"高负载应用（英文逗号分隔）",@"Performance apps (comma-separated)") frame:NSMakeRect(36,62,260,19) size:11 weight:NSFontWeightMedium]];NSTextField *apps=[[NSTextField alloc]initWithFrame:NSMakeRect(280,57,280,25)];apps.stringValue=[d stringForKey:@"performanceApplications"]?:@"";apps.tag=400;apps.delegate=self;[self.preferencesContent addSubview:apps];
+  }else{
+    NSArray *history=[self.controller savedThermalHistory];[self.preferencesContent addSubview:[self preferenceLabel:FT(@"温度历史",@"Temperature History") frame:NSMakeRect(36,316,220,24) size:15 weight:NSFontWeightSemibold]];NSArray *periods=@[@300,@3600,@86400];NSArray *titles=FT(@[@"最近 5 分钟",@"最近 1 小时",@"最近 24 小时"],@[@"Last 5 minutes",@"Last hour",@"Last 24 hours"]);for(NSInteger i=0;i<3;i++){NSTextField *row=[self preferenceLabel:[self historySummary:history seconds:[periods[i]doubleValue] title:titles[i]] frame:NSMakeRect(36,270-i*48,520,24) size:12 weight:NSFontWeightRegular];[self.preferencesContent addSubview:row];}NSTextField *correlation=[self preferenceLabel:[self historyCorrelation:history] frame:NSMakeRect(36,120,520,22) size:11 weight:NSFontWeightRegular];[self.preferencesContent addSubview:correlation];[self.preferencesContent addSubview:[self preferenceLabel:[NSString stringWithFormat:FT(@"本机保存 %ld 条记录 · 最多保留 24 小时",@"%ld local samples · retained for up to 24 hours"),history.count] frame:NSMakeRect(36,86,500,20) size:11 weight:NSFontWeightRegular]];NSButton *clear=[NSButton buttonWithTitle:FT(@"清除历史记录",@"Clear History") target:self action:@selector(clearHistory:)];clear.frame=NSMakeRect(36,38,130,30);[self.preferencesContent addSubview:clear];
   }
 }
 - (NSString*)metricText:(NSInteger)index suffix:(NSString*)suffix {double value=self.latestTemperatures.count>(NSUInteger)index?[self.latestTemperatures[index]doubleValue]:0;return [NSString stringWithFormat:@"%.0f%@",value,suffix];}
 - (NSString*)statusBarPreviewText {NSMutableArray *parts=[NSMutableArray array];NSUserDefaults*d=NSUserDefaults.standardUserDefaults;if([d boolForKey:@"statusMetricLogo"])[parts addObject:@"◉"];if([d boolForKey:@"statusMetricCPU"])[parts addObject:[NSString stringWithFormat:@"CPU %@",[self metricText:0 suffix:@"°"]]];if([d boolForKey:@"statusMetricGPU"])[parts addObject:[NSString stringWithFormat:@"GPU %@",[self metricText:1 suffix:@"°"]]];if([d boolForKey:@"statusMetricSSD"])[parts addObject:[NSString stringWithFormat:@"SSD %@",[self metricText:2 suffix:@"°"]]];if([d boolForKey:@"statusMetricFan"])[parts addObject:[NSString stringWithFormat:@"%.0f RPM",self.controller.fanGraphic.rpm]];return [parts componentsJoinedByString:@"   "];}
 - (void)toggleStatusOption:(NSSwitch*)sender {NSArray *keys=@[@"statusBarEnabled",@"statusBarWhenWindowOpen",@"statusBarAtLaunch"];[NSUserDefaults.standardUserDefaults setBool:sender.state==NSControlStateValueOn forKey:keys[sender.tag-100]];[self updateStatusItemTitle];}
 - (void)toggleStatusMetric:(NSButton*)sender {NSArray *keys=@[@"statusMetricLogo",@"statusMetricCPU",@"statusMetricGPU",@"statusMetricSSD",@"statusMetricFan"];[NSUserDefaults.standardUserDefaults setBool:sender.state==NSControlStateValueOn forKey:keys[sender.tag]];[self updateStatusItemTitle];[self renderPreferencesTab:1];}
+- (void)quickProfile:(NSMenuItem*)sender {[NSUserDefaults.standardUserDefaults removeObjectForKey:@"temporaryBoostUntil"];[self.controller applyProfileIndex:sender.tag];}
+- (void)startBoost:(NSMenuItem*)sender {[self.controller startTemporaryBoostMinutes:sender.tag];}
+- (void)toggleAutomation:(NSSwitch*)sender {NSArray *keys=@[@"customCurveEnabled",@"highTemperatureProtection",@"applicationAutomationEnabled",@"powerAutomationEnabled"];[NSUserDefaults.standardUserDefaults setBool:sender.state==NSControlStateValueOn forKey:keys[sender.tag-200]];self.controller.lastAutomaticTarget=NAN;}
+- (void)controlTextDidEndEditing:(NSNotification*)notification {NSTextField *field=notification.object;NSUserDefaults*d=NSUserDefaults.standardUserDefaults;if(field.tag==400){[d setObject:field.stringValue forKey:@"performanceApplications"];}else if(field.tag==401){NSMutableArray *temperatures=[NSMutableArray array],*levels=[NSMutableArray array];double previous=0;for(NSString *pair in [field.stringValue componentsSeparatedByString:@","]){NSArray *parts=[pair componentsSeparatedByString:@":"];if(parts.count==2){double temperature=[parts[0]doubleValue],level=[parts[1]doubleValue];if(temperature>previous&&temperature>=20&&temperature<=110&&level>=0&&level<=100){[temperatures addObject:@(temperature)];[levels addObject:@(level)];previous=temperature;}}}if(temperatures.count==4){[d setObject:temperatures forKey:@"curveTemperatures"];[d setObject:levels forKey:@"curveLevels"];}else{field.stringValue=@"50:20, 65:45, 80:75, 90:100";}}else if(field.tag==402){double value=MAX(60,MIN(105,field.doubleValue));[d setDouble:value forKey:@"highTemperatureThreshold"];field.doubleValue=value;}else if(field.tag==403){double high=[d doubleForKey:@"highTemperatureThreshold"],value=MAX(45,MIN(high-3,field.doubleValue));[d setDouble:value forKey:@"highTemperatureRecovery"];field.doubleValue=value;}self.controller.lastAutomaticTarget=NAN;}
+- (void)clearHistory:(id)sender {NSAlert *alert=[NSAlert new];alert.messageText=FT(@"清除温度历史？",@"Clear temperature history?");alert.informativeText=FT(@"这会删除本机保存的最近 24 小时记录。",@"This removes the last 24 hours of locally stored samples.");[alert addButtonWithTitle:FT(@"清除",@"Clear")];[alert addButtonWithTitle:FT(@"取消",@"Cancel")];[alert beginSheetModalForWindow:self.preferencesWindow completionHandler:^(NSModalResponse response){if(response==NSAlertFirstButtonReturn){[NSUserDefaults.standardUserDefaults removeObjectForKey:@"thermalHistory"];[self renderPreferencesTab:3];}}];}
 - (void)showPreferencesTab:(NSInteger)tab {for(NSView *view in self.preferencesContent.subviews)[view removeFromSuperview];if(tab==0){[self.preferencesContent addSubview:[self preferenceLabel:@"通用设置" frame:NSMakeRect(42,330,180,30) size:22 weight:NSFontWeightSemibold]];[self.preferencesContent addSubview:[self preferenceLabel:@"开机自动启动" frame:NSMakeRect(42,260,220,26) size:16 weight:NSFontWeightMedium]];[self.preferencesContent addSubview:[self preferenceLabel:@"登录 Mac 后自动启动 FanTune，持续守护温度。" frame:NSMakeRect(42,232,420,22) size:12 weight:NSFontWeightRegular]];NSSwitch *launch=[NSSwitch new];launch.frame=NSMakeRect(580,255,52,32);launch.state=SMAppService.mainAppService.status==SMAppServiceStatusEnabled?NSControlStateValueOn:NSControlStateValueOff;launch.target=self;launch.action=@selector(toggleLaunchAtLogin:);[self.preferencesContent addSubview:launch];[self.preferencesContent addSubview:[self preferenceLabel:@"关闭主窗口" frame:NSMakeRect(42,155,220,26) size:16 weight:NSFontWeightMedium]];[self.preferencesContent addSubview:[self preferenceLabel:@"隐藏到菜单栏，风扇控制继续运行" frame:NSMakeRect(42,118,360,24) size:14 weight:NSFontWeightRegular]];}else{[self.preferencesContent addSubview:[self preferenceLabel:@"状态栏" frame:NSMakeRect(42,330,180,30) size:22 weight:NSFontWeightSemibold]];[self.preferencesContent addSubview:[self preferenceLabel:@"显示实时温度" frame:NSMakeRect(42,270,220,26) size:16 weight:NSFontWeightMedium]];NSSwitch *show=[NSSwitch new];show.frame=NSMakeRect(580,265,52,32);show.state=[[NSUserDefaults standardUserDefaults]boolForKey:@"showMenuBarTemperature"]?NSControlStateValueOn:NSControlStateValueOff;show.target=self;show.action=@selector(toggleTemperature:);[self.preferencesContent addSubview:show];[self.preferencesContent addSubview:[self preferenceLabel:@"温度传感器" frame:NSMakeRect(42,205,220,26) size:16 weight:NSFontWeightMedium]];NSInteger selected=[[NSUserDefaults standardUserDefaults]integerForKey:@"menuBarSensor"];NSMutableArray *items=[NSMutableArray array];for(NSInteger i=0;i<3;i++){NSButton *radio=[NSButton radioButtonWithTitle:@[@"CPU 温度",@"GPU 温度",@"SSD 温度"][i] target:self action:@selector(selectMenuBarSensor:)];radio.frame=NSMakeRect(42+i*180,155,150,32);radio.tag=i;radio.state=i==selected?NSControlStateValueOn:NSControlStateValueOff;[self.preferencesContent addSubview:radio];[items addObject:radio];}self.sensorItems=items;[self.preferencesContent addSubview:[self preferenceLabel:@"预览" frame:NSMakeRect(42,88,80,22) size:13 weight:NSFontWeightRegular]];double preview=self.latestTemperatures.count>(NSUInteger)selected?[self.latestTemperatures[selected]doubleValue]:0;[self.preferencesContent addSubview:[self preferenceLabel:[NSString stringWithFormat:@"◉  %.0f°",preview] frame:NSMakeRect(120,70,170,54) size:24 weight:NSFontWeightSemibold]];}}
-- (void)toggleLaunchAtLogin:(id)sender {NSError *error=nil;if(SMAppService.mainAppService.status==SMAppServiceStatusEnabled)[SMAppService.mainAppService unregisterAndReturnError:&error];else [SMAppService.mainAppService registerAndReturnError:&error];[sender setState:SMAppService.mainAppService.status==SMAppServiceStatusEnabled?NSControlStateValueOn:NSControlStateValueOff];if(error){NSAlert *alert=[NSAlert new];alert.messageText=@"开机启动没有设置成功";alert.informativeText=error.localizedDescription;[alert runModal];}}
+- (void)toggleLaunchAtLogin:(id)sender {NSError *error=nil;if(SMAppService.mainAppService.status==SMAppServiceStatusEnabled)[SMAppService.mainAppService unregisterAndReturnError:&error];else [SMAppService.mainAppService registerAndReturnError:&error];[sender setState:SMAppService.mainAppService.status==SMAppServiceStatusEnabled?NSControlStateValueOn:NSControlStateValueOff];if(error){NSAlert *alert=[NSAlert new];alert.messageText=FT(@"开机启动没有设置成功",@"Could not update launch at login");alert.informativeText=error.localizedDescription;[alert runModal];}}
 - (void)toggleTemperature:(id)sender {BOOL show=[sender state]==NSControlStateValueOn;[[NSUserDefaults standardUserDefaults]setBool:show forKey:@"showMenuBarTemperature"];[self updateStatusItemTitle];}
 - (void)selectMenuBarSensor:(id)sender {[[NSUserDefaults standardUserDefaults]setInteger:[sender tag] forKey:@"menuBarSensor"];for(id item in self.sensorItems)[item setState:item==sender?NSControlStateValueOn:NSControlStateValueOff];[self updateStatusItemTitle];}
 - (void)temperaturesDidUpdate:(NSNotification*)note {self.latestTemperatures=note.userInfo[@"temperatures"];[self updateStatusItemTitle];}

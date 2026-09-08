@@ -7,7 +7,7 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 mkdir -p "$ROOT/.cache/clang"
 ARCHS=(-arch arm64 -arch x86_64)
-CLANG_MODULE_CACHE_PATH="$ROOT/.cache/clang" clang "${ARCHS[@]}" -fobjc-arc -O2 -framework Cocoa -framework QuartzCore -framework ServiceManagement "$ROOT/Native/main.m" -o "$APP/Contents/MacOS/FanTune"
+CLANG_MODULE_CACHE_PATH="$ROOT/.cache/clang" clang "${ARCHS[@]}" -fobjc-arc -O2 -framework Cocoa -framework QuartzCore -framework ServiceManagement -framework IOKit "$ROOT/Native/main.m" -o "$APP/Contents/MacOS/FanTune"
 CLANG_MODULE_CACHE_PATH="$ROOT/.cache/clang" clang "${ARCHS[@]}" -O2 -framework IOKit -framework CoreFoundation "$ROOT/Native/smc_helper.c" -o "$APP/Contents/Resources/fantune-smc"
 cp "$ROOT/THIRD_PARTY_NOTICES.txt" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.txt"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
