@@ -6,7 +6,7 @@
 
 FanTune 通过 AppleSMC 读取 Mac 的实时温度与风扇状态，并提供三种容易理解的散热策略。应用使用原生 AppKit 构建，支持菜单栏运行、实时温度展示与安全的自动控制恢复。
 
-> 当前版本：1.0.2 · 支持 macOS 14 及以上 · Universal（Apple Silicon 与 Intel）
+> 当前版本：1.0.3 · 支持 macOS 14 及以上 · Universal（Apple Silicon 与 Intel）
 
 ## 主要功能
 
@@ -52,7 +52,7 @@ FanTune 通过 AppleSMC 读取 Mac 的实时温度与风扇状态，并提供三
 ./build-dmg.sh
 ```
 
-默认输出为 `dist/FanTune-1.0.2-Universal.dmg`。
+默认输出为 `dist/FanTune-1.0.3-Universal.dmg`。
 
 ## 工作原理与安全保护
 
@@ -92,7 +92,7 @@ A clean, native fan monitoring and thermal control utility for macOS.
 
 FanTune reads live temperatures and fan data through AppleSMC and provides three approachable cooling profiles. Built with native AppKit, it supports menu bar operation, live temperature display, and automatic restoration of macOS fan control.
 
-> Current version: 1.0.2 · Requires macOS 14 or later · Universal (Apple Silicon and Intel)
+> Current version: 1.0.3 · Requires macOS 14 or later · Universal (Apple Silicon and Intel)
 
 ## Features
 
@@ -138,7 +138,7 @@ Creating the installer also requires Node.js, npm, and ImageMagick:
 ./build-dmg.sh
 ```
 
-The default output is `dist/FanTune-1.0.2-Universal.dmg`.
+The default output is `dist/FanTune-1.0.3-Universal.dmg`.
 
 ## How It Works and Safety
 
