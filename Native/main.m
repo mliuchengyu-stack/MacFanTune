@@ -270,7 +270,7 @@ static id FT(id chinese,id english){return FTUsesChinese()?chinese:english;}
 }
 @end
 
-@interface AppDelegate : NSObject <NSApplicationDelegate,NSTextFieldDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate,NSTextFieldDelegate,NSWindowDelegate>
 @property NSWindow *window;
 @property FanTuneController *controller;
 @property NSStatusItem *statusItem;
@@ -288,7 +288,7 @@ static id FT(id chinese,id english){return FTUsesChinese()?chinese:english;}
   [[NSUserDefaults standardUserDefaults]registerDefaults:@{@"statusBarEnabled":@YES,@"statusBarWhenWindowOpen":@YES,@"statusBarAtLaunch":@YES,@"statusMetricLogo":@YES,@"statusMetricCPU":@YES,@"statusMetricGPU":@NO,@"statusMetricSSD":@NO,@"statusMetricFan":@YES,@"customCurveEnabled":@NO,@"curveTemperatures":@[@50,@65,@80,@90],@"curveLevels":@[@20,@45,@75,@100],@"highTemperatureProtection":@YES,@"highTemperatureThreshold":@85,@"highTemperatureRecovery":@75,@"applicationAutomationEnabled":@NO,@"performanceApplications":@"Final Cut Pro, Blender, Xcode",@"powerAutomationEnabled":@NO}];
   self.controller=[FanTuneController new];
   self.window=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,1040,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
-  self.window.title=@"FanTune"; self.window.titlebarAppearsTransparent=YES; self.window.appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua]; self.window.backgroundColor=[NSColor colorWithWhite:.96 alpha:1]; self.window.contentViewController=self.controller; self.window.releasedWhenClosed=NO;
+  self.window.title=@"FanTune"; self.window.titlebarAppearsTransparent=YES; self.window.appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua]; self.window.backgroundColor=[NSColor colorWithWhite:.96 alpha:1]; self.window.contentViewController=self.controller; self.window.releasedWhenClosed=NO; self.window.delegate=self;
   [self setupStatusItem];
   [[NSNotificationCenter defaultCenter]addObserver:self selector:@selector(temperaturesDidUpdate:) name:@"FanTuneTemperaturesDidUpdate" object:nil];
   [self.window center]; [self showWindow:nil];
@@ -371,10 +371,17 @@ static id FT(id chinese,id english){return FTUsesChinese()?chinese:english;}
 - (void)updateStatusItemTitle {NSUserDefaults*d=NSUserDefaults.standardUserDefaults;self.statusItem.visible=[d boolForKey:@"statusBarEnabled"];self.statusItem.button.image=[d boolForKey:@"statusMetricLogo"]?[NSImage imageWithSystemSymbolName:@"fanblades" accessibilityDescription:@"FanTune"]:nil;NSMutableArray *parts=[NSMutableArray array];if([d boolForKey:@"statusMetricCPU"]&&self.latestTemperatures.count>0)[parts addObject:[NSString stringWithFormat:@"CPU %.0f°",[self.latestTemperatures[0]doubleValue]]];if([d boolForKey:@"statusMetricGPU"]&&self.latestTemperatures.count>1)[parts addObject:[NSString stringWithFormat:@"GPU %.0f°",[self.latestTemperatures[1]doubleValue]]];if([d boolForKey:@"statusMetricSSD"]&&self.latestTemperatures.count>2)[parts addObject:[NSString stringWithFormat:@"SSD %.0f°",[self.latestTemperatures[2]doubleValue]]];if([d boolForKey:@"statusMetricFan"])[parts addObject:[NSString stringWithFormat:@"%.0f RPM",self.controller.fanGraphic.rpm]];self.statusItem.button.title=parts.count?[NSString stringWithFormat:@" %@",[parts componentsJoinedByString:@"  "]]:@"";self.statusItem.length=parts.count?NSVariableStatusItemLength:NSSquareStatusItemLength;}
 - (void)showWindow:(id)sender {
   dispatch_async(dispatch_get_main_queue(), ^{
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     if(self.window.isMiniaturized)[self.window deminiaturize:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self.window makeKeyAndOrderFront:nil];
     [self.window orderFrontRegardless];
+  });
+}
+- (void)windowWillClose:(NSNotification*)notification {
+  if(notification.object!=self.window)return;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if(!self.window.isVisible)[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
   });
 }
 - (void)quitApp:(id)sender { [NSApp terminate:nil]; }
